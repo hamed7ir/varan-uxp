@@ -385,6 +385,12 @@ def check_compiler(compiler, language, target):
             if info.type in ('clang', 'gcc'):
                 # We're on Clang or GCC, enable C++17 and add GNU extensions.
                 append_flag('-std=gnu++17')
+            elif info.type == 'clang-cl':
+                # ARM32/UWP configure spike: -std:c++17 is a direct clang-cl
+                # DRIVER flag; it must NOT be wrapped in -Xclang (append_flag
+                # prepends -Xclang for clang-cl, which forwards to cc1 where only
+                # -std=c++17 is valid, yielding "unknown argument: -std:c++17").
+                flags.append('-std:c++17')
             else:
                 # We're on MSVC; enable C++17 language mode.
                 append_flag('-std:c++17')

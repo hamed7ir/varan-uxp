@@ -204,10 +204,15 @@ case "$target" in
         AC_SUBST(MSVC_CXX_RUNTIME_DLL)
 
         # Check linker version
-        _LD_FULL_VERSION=`"${LD}" -v 2>&1 | sed -nre "$_MSVC_VER_FILTER"`
-        _LD_MAJOR_VERSION=`echo ${_LD_FULL_VERSION} | $AWK -F\. '{ print $1 }'`
-        if test "$_LD_MAJOR_VERSION" != "$_CC_SUITE"; then
-            AC_MSG_ERROR([The linker major version, $_LD_FULL_VERSION,  does not match the compiler suite version, $_CC_SUITE.])
+        # ARM32/UWP configure spike: lld-link is not versioned like MSVC link.exe
+        # (its `-v` banner does not match _MSVC_VER_FILTER -> empty _LD_FULL_VERSION),
+        # so the linker-vs-compiler-suite match is meaningless for clang-cl/lld.
+        if test -z "$CLANG_CL"; then
+            _LD_FULL_VERSION=`"${LD}" -v 2>&1 | sed -nre "$_MSVC_VER_FILTER"`
+            _LD_MAJOR_VERSION=`echo ${_LD_FULL_VERSION} | $AWK -F\. '{ print $1 }'`
+            if test "$_LD_MAJOR_VERSION" != "$_CC_SUITE"; then
+                AC_MSG_ERROR([The linker major version, $_LD_FULL_VERSION,  does not match the compiler suite version, $_CC_SUITE.])
+            fi
         fi
 
         INCREMENTAL_LINKER=1
