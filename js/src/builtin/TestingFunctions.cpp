@@ -35,6 +35,7 @@
 # include "jit/arm/Assembler-arm.h"   // VARAN P1.2b: VaranEncodeBranchInst/BranchKind, r0, Imm16
 # include "jit/MacroAssembler.h"      // VARAN P1.2b: bind() end-to-end test drives a real MacroAssembler
 # include "jit/Ion.h"                 // VARAN Batch 4: AutoFlushICache for the pool executableCopy test
+# include "jit/Linker.h"              // VARAN 2026-07-24: real JitCode, so real PatchJump can be called
 #endif
 #include "js/Debug.h"
 #include "js/HashTable.h"
@@ -5127,6 +5128,86 @@ VaranT2JumpPatch(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 static bool
+VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN 2026-07-24 -- the RED TEST for *2 (the PatchJump condition-inversion defect).
+    //
+    // THE MECHANISM UNDER TEST (source, verbatim):
+    //   VaranComputeJump2's >+-1MB arm stores the INVERTED condition in slot0
+    //     (Assembler-arm.cpp)  uint32_t inv = ...InvertCondition(...);  *w0 = EncodeBccT2(4, inv);
+    //   PatchJump does NOT carry the condition -- it re-derives it from the LIVE slot0 word
+    //     (Assembler-arm.cpp)  uint32_t cf = 14u;  VaranDecodeBranchCond(*w0, &cf);
+    //   IonCaches patches each conditional next-stub site EXACTLY TWICE.
+    // => after one overflow patch, every later patch of that site is computed with !c.
+    //
+    // The existing varanT2JumpPatch self-test is structurally blind to this: it never feeds an
+    // ALREADY-EMITTED slot0 back into VaranComputeJump2. This one does exactly that, through the
+    // REAL MacroAssembler, REAL jumpWithPatch and REAL jit::PatchJump on REAL JitCode.
+    //
+    // Returns a string "w0a,w1a,w0b,w1b" (hex) -- the slot pair after patch #1 and after patch #2.
+    // The VERDICT IS COMPUTED OUTSIDE, by byte-comparison against clang's integrated assembler
+    // (varan-jit/tools/t2oracle.sh). Deliberately NOT decoded here: the in-tree ARM disassembler has
+    // zero Thumb-2 support and prints confident garbage, and a test that grades itself with the
+    // suspect decoder proves nothing.
+    //
+    // ARGUMENT REQUIRED (a bare call is inert and returns the -2 sentinel): basic/bug908915.js calls
+    // every shell testing function with no arguments, and this project has twice had its own
+    // scaffolding counted as a product defect that way.
+    //   mode 0 = FAR then NEAR  (the *2 trigger: patch #1 takes the overflow arm)
+    //   mode 1 = NEAR then NEAR (control: the overflow arm is never taken, condition must survive)
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() < 1 || !args[0].isInt32()) {
+        args.rval().setInt32(-2);
+        return true;
+    }
+    int mode = args[0].toInt32();
+
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    AutoFlushICache afc("varanT2PatchJumpTwice");
+    MacroAssembler masm;
+
+    // Lay the 2-slot conditional patchable site with a KNOWN condition, then bind it (that is the
+    // shape IonCaches produces: jumpWithPatch -> bind -> PatchJump -> PatchJump).
+    RepatchLabel R;
+    CodeOffsetJump j = masm.jumpWithPatch(&R, Assembler::Equal);
+    for (int i = 0; i < 4; i++)
+        masm.as_movw(r0, Imm16(0));
+    masm.bind(&R);
+    for (int i = 0; i < 4; i++)
+        masm.as_movw(r0, Imm16(0));
+    if (masm.oom()) { args.rval().setInt32(-3); return true; }
+
+    Linker linker(masm);
+    JitCode* code = linker.newCode<CanGC>(cx, OTHER_CODE);
+    if (!code) { args.rval().setInt32(-4); return true; }
+
+    CodeLocationJump jump(code, j);
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(jump.raw());
+
+    // PATCH #1.
+    uint8_t* t1 = (mode == 0)
+        ? (reinterpret_cast<uint8_t*>(const_cast<uint32_t*>(w)) + (2 << 20))  // +2MB => forces the overflow arm
+        : (code->raw() + 4);                                                   // near
+    PatchJump(jump, CodeLocationLabel(t1));
+    uint32_t w0a = w[0], w1a = w[1];
+
+    // PATCH #2 -- always near, so an honest implementation must emit B<Equal>.W(target) here.
+    PatchJump(jump, CodeLocationLabel(code->raw() + 4));
+    uint32_t w0b = w[0], w1b = w[1];
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%08x,%08x,%08x,%08x", w0a, w1a, w0b, w1b);
+    JSString* s = JS_NewStringCopyZ(cx, buf);
+    if (!s)
+        return false;
+    args.rval().setString(s);
+    return true;
+}
+
+static bool
 VaranT2PoolDefer(JSContext* cx, unsigned argc, Value* vp)
 {
     // VARAN escape-closure: the A32 pool escape is now fully CLOSED. The double/float32 pool paths
@@ -5738,6 +5819,11 @@ static const JSFunctionSpecWithHelp TestingFunctions[] = {
     JS_FN_HELP("varanT2JumpPatch", VaranT2JumpPatch, 0, 0,
 "varanT2JumpPatch()",
 "  VARAN Batch 4: 2-slot patchable jump -- VaranComputeJump2 (incl >+-1MB fallback) + jumpWithPatch/bind(RepatchLabel*); 0 = pass."),
+    JS_FN_HELP("varanT2PatchJumpTwice", VaranT2PatchJumpTwice, 1, 0,
+"varanT2PatchJumpTwice(mode)",
+"  VARAN 2026-07-24 RED TEST for *2: double-patch a conditional patchable site through real jit::PatchJump.\n"
+"  mode 0 = far-then-near (overflow arm on patch #1); mode 1 = near-then-near (control).\n"
+"  Returns \"w0a,w1a,w0b,w1b\" hex; graded OUTSIDE against clang's assembler. Bare call returns -2."),
     JS_FN_HELP("varanT2RegBranch", VaranT2RegBranch, 0, 0,
 "varanT2RegBranch()",
 "  VARAN Batch 4: bx/blx/bkpt/NOP.W byte-match + the blx HIGH-halfword LR-packing execution proof; 0 = pass."),
