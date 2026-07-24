@@ -9,3 +9,17 @@
 ifdef _MSC_VER
 AS = $(topsrcdir)/js/src/ctypes/libffi/msvcc.sh
 endif
+
+# Varan (M4.1): Windows-ARM32 assembles libffi 3.4.6's Microsoft
+# MSVC-ABI backend (src/arm/sysv_msvc_arm32.S, armasm syntax) via a SCOPED AS
+# override -- clang-cl -EP (preprocess) then armasm.exe -> Thumb-2. This applies
+# ONLY to this directory (its only ARM assembly source is libffi's), so every
+# other .S in the tree keeps clang's integrated-as. Placed after the x86
+# _MSC_VER/msvcc.sh block so the ARM path wins if both would ever match. See
+# config/external/ffi/moz.build (FFI_TARGET=='ARM' && OS_TARGET=='WINNT' branch).
+ifeq ($(FFI_TARGET),ARM)
+ifeq ($(OS_TARGET),WINNT)
+AS = $(topsrcdir)/config/external/ffi/armasm-wrap.sh
+AS_DASH_C_FLAG =
+endif
+endif

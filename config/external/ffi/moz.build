@@ -90,15 +90,34 @@ else:
         '/js/src/ctypes/libffi/src/java_raw_api.c',
         '/js/src/ctypes/libffi/src/prep_cif.c',
         '/js/src/ctypes/libffi/src/raw_api.c',
+        # Varan (M4.1): libffi 3.4.6's closures.c calls
+        # ffi_tramp_is_supported/alloc/get_addr/free UNCONDITIONALLY. tramp.c
+        # provides them: the full static-trampoline impl under FFI_EXEC_STATIC_TRAMP
+        # (off here), else 5 inert STUBS (is_supported()->0), so closures fall back
+        # to the normal dlmalloc/VirtualAlloc path. Without tramp.c the link fails
+        # with undefined ffi_tramp_*. (The old pre-3.4 in-tree libffi had no tramp.c.)
+        '/js/src/ctypes/libffi/src/tramp.c',
         '/js/src/ctypes/libffi/src/types.c',
     ]
 
     # Per-platform sources and flags.
     ffi_srcs = ()
     if CONFIG['FFI_TARGET'] == 'ARM':
-        ffi_srcs = ('sysv.S', 'ffi.c')
-        if CONFIG['CLANG_CXX']:
-            ASFLAGS += ['-no-integrated-as']
+        if CONFIG['OS_TARGET'] == 'WINNT':
+            # Varan (M4.1): Windows-ARM32 uses libffi 3.4.6's
+            # Microsoft MSVC-ABI backend (sysv_msvc_arm32.S, armasm syntax) instead
+            # of the GNU sysv.S (A32 bodies clang's IAS rejects). AS is overridden
+            # to config/external/ffi/armasm-wrap.sh in THIS dir's Makefile.in
+            # (clang-cl -EP -> armasm.exe -> Thumb-2); scoped so every other .S in
+            # the tree keeps clang's integrated-as. FFI_STATIC_BUILD keeps ffi.h's
+            # FFI_API empty (no __declspec(dllimport) -> no lld __imp_ thumb-bit
+            # thunks, the bug #2 class). ffi.c compiles via clang-cl as usual.
+            ffi_srcs = ('sysv_msvc_arm32.S', 'ffi.c')
+            DEFINES['FFI_STATIC_BUILD'] = True
+        else:
+            ffi_srcs = ('sysv.S', 'ffi.c')
+            if CONFIG['CLANG_CXX']:
+                ASFLAGS += ['-no-integrated-as']
     elif CONFIG['FFI_TARGET'] == 'AARCH64':
         ffi_srcs = ('sysv.S', 'ffi.c')
     elif CONFIG['FFI_TARGET'] == 'LOONGARCH64':

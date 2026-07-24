@@ -298,7 +298,7 @@ avpriv_report_missing_feature
 avpriv_request_sample
 avpriv_scalarproduct_float_c
 avpriv_set_systematic_pal2
-#if defined(XP_WIN) && !defined(_ARM64_)
+#if defined(XP_WIN) && !defined(_ARM64_) && !defined(_ARM_) && !defined(_M_ARM)
 avpriv_emms_asm
 #endif
 avpriv_slicethread_create

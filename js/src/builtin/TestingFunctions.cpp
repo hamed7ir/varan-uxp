@@ -30,6 +30,12 @@
 #endif
 #include "jit/InlinableNatives.h"
 #include "jit/JitFrameIterator.h"
+#if defined(JS_SIMULATOR_ARM) && defined(VARAN_THUMB2)
+# include "jit/arm/Simulator-arm.h"   // VARAN P1.1: run the Thumb-2 hello-world through the sim
+# include "jit/arm/Assembler-arm.h"   // VARAN P1.2b: VaranEncodeBranchInst/BranchKind, r0, Imm16
+# include "jit/MacroAssembler.h"      // VARAN P1.2b: bind() end-to-end test drives a real MacroAssembler
+# include "jit/Ion.h"                 // VARAN Batch 4: AutoFlushICache for the pool executableCopy test
+#endif
 #include "js/Debug.h"
 #include "js/HashTable.h"
 #include "js/StructuredClone.h"
@@ -55,6 +61,10 @@
 
 #include "jscntxtinlines.h"
 #include "jsobjinlines.h"
+
+#if defined(JS_SIMULATOR_ARM) && defined(VARAN_THUMB2)
+# include "jit/MacroAssembler-inl.h"  // VARAN P1.2b: MacroAssembler ctor + inline helpers
+#endif
 
 #include "vm/EnvironmentObject-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -4018,7 +4028,1760 @@ GetErrorNotes(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+#if defined(JS_SIMULATOR_ARM) && defined(VARAN_THUMB2)
+static bool
+VaranT2Hello(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.1 close-the-loop: run the encoder-verified Thumb-2 hello-world through the
+    // simulator. Bytes = adds.w r0,r0,r1 ; bx lr (15/15 oracle byte-match). The simulator
+    // INTERPRETS (reads+decodes), so a plain readable buffer suffices -- no exec memory.
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int32_t a = args.get(0).isInt32() ? args.get(0).toInt32() : 0;
+    int32_t b = args.get(1).isInt32() ? args.get(1).toInt32() : 0;
+    uint8_t code[] = { 0x10, 0xeb, 0x01, 0x00, 0x70, 0x47 };
+    js::jit::Simulator* sim = cx->runtime()->simulator();
+    // bit0-set entry pointer (F2); the sim masks bit0 at fetch.
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(code) | 1);
+    int64_t r = sim->call(entry, 2, a, b);
+    args.rval().setInt32(int32_t(r));
+    return true;
+}
+static bool
+VaranT2Udf(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.1: run a wide UDF.W through the sim -> it must print the "UDF hit" diagnostic and
+    // MOZ_CRASH (fail LOUD at a known point). This function exists to CRASH; that is its contract.
+    //
+    // ARGUMENT REQUIRED (Batch G). `basic/bug908915.js` is a shotgun that calls EVERY shell testing
+    // function with no arguments -- `for each (let e in newGlobal()) { ... e(); }` -- with a blacklist
+    // of only quit/crash/readline/terminate/nestedShell. So it called this one and took the crash,
+    // and that single self-inflicted abort was one of the last seven Baseline-gate failures. It was
+    // never an encoder gap: the emit-time census is EMPTY at the crash, proving `emitUdf` was never
+    // called, because the 0x112 word below is a hand-assembled byte array that never goes through the
+    // assembler at all. (The old comment's "category ALU, shape shifted-reg, op ORR" decoding was
+    // also wrong -- 0x112 was picked at P1.1 only so the diagnostic would print a plausible bucket.)
+    //
+    // Requiring an explicit argument makes a no-argument call a harmless no-op, so the shotgun --
+    // and any future enumerate-and-call test -- passes, while the deliberate crash stays available
+    // as `varanT2Udf(1)`. Fixing it here is right: the corpus is upstream test code, and a
+    // deliberately-crashing debug hook has no business detonating on a bare call.
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() == 0) {
+        args.rval().setUndefined();
+        return true;
+    }
+    uint8_t code[] = { 0xf0, 0xf7, 0x12, 0xa1 };   // udf.w #0x112
+    js::jit::Simulator* sim = cx->runtime()->simulator();
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(code) | 1);
+    (void)sim->call(entry, 1, 0);   // crashes with the diagnostic before returning
+    args.rval().setUndefined();
+    return true;
+}
+static bool
+VaranT2MovwT(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.2b: movw r0,#0x1234 ; movt r0,#0x5678 ; bx lr  -> r0 = 0x56781234 (1450709556).
+    // Bytes are oracle-verified (6/6); this proves the sim DECODE builds the 32-bit value.
+    CallArgs args = CallArgsFromVp(argc, vp);
+    uint8_t code[] = { 0x41,0xf2,0x34,0x20, 0xc5,0xf2,0x78,0x60, 0x70,0x47 };
+    js::jit::Simulator* sim = cx->runtime()->simulator();
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(code) | 1);
+    int64_t r = sim->call(entry, 1, 0);
+    args.rval().setNumber(double(uint32_t(r)));
+    return true;
+}
+static bool
+VaranT2Branch(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.2b Group 2 -- Task E sim CONTROL-FLOW test. A hand-laid Thumb-2 program built from
+    // the SAME encoder (VaranEncodeBranchInst) the assembler uses, run through the simulator; the
+    // returned r0 is correct ONLY if every branch LANDS where intended. adds.w r0,r0,r1 (+1 each
+    // time it executes) is the marker; r1 = 1. Layout (byte offsets), start r0 = 100:
+    //   0  adds                 ; r0=101, flags Z=0 N=0
+    //   4  beq +8  (->12)       ; EQ (Z=0) -> NOT taken (fall through)      [cond not-taken]
+    //   8  bne +8  (->16)       ; NE (Z=0) -> taken, skips the poison at 12 [cond taken]
+    //   12 adds (POISON)        ; must be skipped
+    //   16 adds                 ; r0=102                                    [reached]
+    //   20 b.w ->32             ; forward, over the backward-target block
+    //   24 adds (BACKTGT)       ; reached later via a BACKWARD branch
+    //   28 b.w ->40             ; forward, past the backward branch site
+    //   32 adds                 ; r0=103
+    //   36 b.w ->24             ; BACKWARD to 24                            [backward]
+    //   40 adds                 ; r0=105 (after 24 ran -> 104, then 40)
+    //   44 bx lr                ; return r0
+    // Correct trace: 0,16,32,24,40 adds run (5x) -> r0 = 105; poison at 12 skipped.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    const uint32_t ADDS = 0x0001EB10u;   // adds.w r0,r0,r1 (oracle-verified, from the hello-world)
+    uint16_t prog[64];
+    int nb = 0;
+    auto put32 = [&](uint32_t w) { prog[nb / 2] = uint16_t(w & 0xffff); prog[nb / 2 + 1] = uint16_t(w >> 16); nb += 4; };
+    auto put16 = [&](uint16_t w) { prog[nb / 2] = w; nb += 2; };
+    put32(ADDS);                                         // 0
+    put32(VaranEncodeBranchInst(false, 8, 0));           // 4  beq +8
+    put32(VaranEncodeBranchInst(false, 8, 1));           // 8  bne +8
+    put32(ADDS);                                         // 12 POISON
+    put32(ADDS);                                         // 16
+    put32(VaranEncodeBranchInst(false, 12, 14));         // 20 b.w ->32
+    put32(ADDS);                                         // 24 BACKTGT
+    put32(VaranEncodeBranchInst(false, 12, 14));         // 28 b.w ->40
+    put32(ADDS);                                         // 32
+    put32(VaranEncodeBranchInst(false, -12, 14));        // 36 b.w ->24 (backward)
+    put32(ADDS);                                         // 40
+    put16(0x4770);                                       // 44 bx lr
+    Simulator* sim = cx->runtime()->simulator();
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+    int64_t r = sim->call(entry, 2, 100, 1);
+    args.rval().setInt32(int32_t(r));                    // expect 105
+    return true;
+}
+static bool
+VaranT2BranchBind(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.2b Group 2 -- Task D bind() END-TO-END. Drives a real MacroAssembler through the
+    // actual as_b/varanAsBCond/bind fixup chain (not encode/decode in isolation), then decodes each
+    // emitted branch and asserts it LANDS at its label -- forward multi-link chains, backward
+    // branches, the in-range 2-slot form (B<c>.W + NOP.W) and the >+-1MB invert+B.W fallback.
+    // Returns the number of FAILED checks (0 = all pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // Decode where the branch at buffer offset `bo` actually lands (in buffer-offset space).
+    auto landing = [&](int bo) -> int {
+        uint32_t w0 = masm.varanPeekWord(bo);
+        int kind = VaranBranchKind(w0);
+        if (kind == 0)
+            return INT32_MIN;
+        uint32_t cond = 14u;
+        VaranDecodeBranchCond(w0, &cond);
+        if (kind == 1 && cond < 14) {
+            // 2-slot conditional: overflow form stores the real target in slot1 (a B.W); the
+            // in-range form keeps it in slot0 (B<c>.W) with slot1 = NOP.W.
+            uint32_t w1 = masm.varanPeekWord(bo + 4);
+            if (VaranBranchKind(w1) == 1)
+                return (bo + 4) + VaranDecodeBranchByteVal(w1);
+            return bo + VaranDecodeBranchByteVal(w0);
+        }
+        return bo + VaranDecodeBranchByteVal(w0);
+    };
+
+    // (1) Forward multi-link chain: cond + uncond + cond, several links deep, all to one label.
+    {
+        Label L;
+        int s1 = masm.as_b(&L, Assembler::Equal).getOffset();       // 2-slot cond
+        int s2 = masm.as_b(&L).getOffset();                         // 1-slot uncond
+        masm.as_movw(r0, Imm16(0));
+        int s3 = masm.as_b(&L, Assembler::NotEqual).getOffset();    // 2-slot cond
+        int s4 = masm.as_b(&L).getOffset();                         // 1-slot uncond
+        masm.bind(&L);
+        int Loff = L.offset();
+        check(!masm.oom());
+        check(landing(s1) == Loff);
+        check(landing(s2) == Loff);
+        check(landing(s3) == Loff);
+        check(landing(s4) == Loff);
+    }
+
+    // (2) Backward branches (target already bound): cond + uncond, both must reach back.
+    {
+        Label M;
+        masm.bind(&M);
+        int Moff = M.offset();
+        masm.as_movw(r0, Imm16(0));
+        masm.as_movw(r0, Imm16(0));
+        int b1 = masm.as_b(&M, Assembler::LessThan).getOffset();    // backward cond (2-slot)
+        int b2 = masm.as_b(&M).getOffset();                         // backward uncond
+        check(!masm.oom());
+        check(landing(b1) == Moff);
+        check(landing(b2) == Moff);
+    }
+
+    // (3) In-range 2-slot conditional (< +-1MB): stays B<c>.W + NOP.W.
+    {
+        Label G;
+        int g1 = masm.as_b(&G, Assembler::Signed).getOffset();
+        for (int n = 0; n < 900000; n += 4)
+            masm.as_movw(r0, Imm16(0));
+        masm.bind(&G);
+        check(!masm.oom());
+        check(landing(g1) == G.offset());
+        // slot1 must be NOP.W (0x8000F3AF) -- the fallback did NOT trigger.
+        check(masm.varanPeekWord(g1 + 4) == 0x8000F3AFu);
+    }
+
+    // (4) Overflow 2-slot conditional (> +-1MB): invert cond + branch-over B.W (NEW machinery).
+    {
+        Label F;
+        int f1 = masm.as_b(&F, Assembler::Signed).getOffset();
+        for (int n = 0; n < 1100000; n += 4)
+            masm.as_movw(r0, Imm16(0));
+        masm.bind(&F);
+        check(!masm.oom());
+        check(landing(f1) == F.offset());
+        // slot1 must now be a real branch (B.W) -- the invert+branch-over fallback triggered.
+        check(VaranBranchKind(masm.varanPeekWord(f1 + 4)) == 1);
+    }
+
+    args.rval().setInt32(fails);   // 0 == every branch bound correctly
+    return true;
+}
+static bool
+VaranT2RetargetSplice(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN P1.2b Group 2 HYGIENE regression: retarget(Label*,Label*) must splice a 2-slot
+    // CONDITIONAL chain correctly. The chain link of a conditional branch lives in slot1 (the
+    // companion B.W), so a plain 1-slot write to slot0 (the pre-fix code) leaves nextLink reading the
+    // stale sentinel and SILENTLY DROPS the target's original chain. Build an L1 chain (cond 2-slot +
+    // uncond 1-slot + cond 2-slot) whose TAIL is a 2-slot conditional, retarget L1 onto L2, bind L2,
+    // and assert ALL five branches (both chains) land at L2. Pre-fix: L2's own branches are orphaned
+    // (they follow the mis-written splice link) and fail to land. Returns failed-check count (0=pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto landing = [&](int bo) -> int {
+        uint32_t w0 = masm.varanPeekWord(bo);
+        int kind = VaranBranchKind(w0);
+        if (kind == 0) return INT32_MIN;
+        uint32_t cond = 14u; VaranDecodeBranchCond(w0, &cond);
+        if (kind == 1 && cond < 14) {
+            uint32_t w1 = masm.varanPeekWord(bo + 4);
+            if (VaranBranchKind(w1) == 1) return (bo + 4) + VaranDecodeBranchByteVal(w1);
+            return bo + VaranDecodeBranchByteVal(w0);
+        }
+        return bo + VaranDecodeBranchByteVal(w0);
+    };
+
+    Label L1, L2;
+    int a1 = masm.as_b(&L1, Assembler::Equal).getOffset();      // L1 chain tail (2-slot cond)
+    int a2 = masm.as_b(&L1).getOffset();                        // 1-slot uncond
+    int a3 = masm.as_b(&L1, Assembler::NotEqual).getOffset();   // L1 chain head (2-slot cond)
+    int b1 = masm.as_b(&L2, Assembler::Signed).getOffset();     // L2 chain tail (2-slot cond)
+    int b2 = masm.as_b(&L2).getOffset();                        // L2 chain head (1-slot uncond)
+    masm.retarget(&L1, &L2);   // prepend L1's chain onto L2 (splices at L1's tail a1)
+    masm.bind(&L2);
+    int L2off = L2.offset();
+    check(!masm.oom());
+    check(landing(a1) == L2off);
+    check(landing(a2) == L2off);
+    check(landing(a3) == L2off);
+    check(landing(b1) == L2off);   // pre-fix: orphaned -> fails
+    check(landing(b2) == L2off);   // pre-fix: orphaned -> fails
+    check(!L1.used());             // retarget resets L1
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2LoadStore(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- LDR/STR core: byte-match (T3 imm+, T4 imm-) + a store/load round-trip.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto dtr = [&](LoadStore ls, int sz, Register rt, Register base, int off) -> uint32_t {
+        int o = masm.nextOffset().getOffset();
+        masm.as_dtr(ls, sz, Offset, rt, DTRAddr(base, DtrOffImm(off)), Assembler::Always);
+        return masm.varanPeekWord(o);
+    };
+    check(dtr(IsLoad,  32, r0, r1,  4) == 0x0004f8d1u);  // ldr.w  r0,[r1,#4]  (T3)
+    check(dtr(IsLoad,  32, r0, r1, -4) == 0x0c04f851u);  // ldr    r0,[r1,#-4] (T4)
+    check(dtr(IsStore, 32, r0, r1,  4) == 0x0004f8c1u);  // str.w  r0,[r1,#4]
+    check(dtr(IsLoad,   8, r0, r1,  4) == 0x0004f891u);  // ldrb.w r0,[r1,#4]
+    check(dtr(IsStore,  8, r0, r1,  4) == 0x0004f881u);  // strb.w r0,[r1,#4]
+    // Execute: str r1,[sp,#-8] ; ldr r0,[sp,#-8] ; bx lr  -> r0 = original r1.
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        uint16_t prog[8];
+        prog[0] = 0xf84du; prog[1] = 0x1c08u;   // str r1,[sp,#-8]
+        prog[2] = 0xf85du; prog[3] = 0x0c08u;   // ldr r0,[sp,#-8]
+        prog[4] = 0x4770u;                       // bx lr
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        check(uint32_t(sim->call(e, 2, 0, 0xcafef00du)) == 0xcafef00du);
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2ExtDtr(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- extended data transfer (LDRH/STRH/LDRSB/LDRSH via the halfword/signed families,
+    // and LDRD/STRD). Byte-match against clang thumbv7 objdump, then execute a strd/ldrd round-trip and
+    // a signed/unsigned halfword load to prove sign-extension + the value path. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto ext = [&](LoadStore ls, int sz, bool sgn, Register rt, EDtrAddr a) -> uint32_t {
+        int o = masm.nextOffset().getOffset();
+        masm.as_extdtr(ls, sz, sgn, Offset, rt, a, Assembler::Always);
+        return masm.varanPeekWord(o);
+    };
+    // Halfword / signed byte / signed halfword: T3 imm+ and register form.
+    check(ext(IsStore, 16, false, r0, EDtrAddr(r1, EDtrOffImm(4)))  == 0x0004f8a1u);  // strh  r0,[r1,#4]
+    check(ext(IsLoad,  16, false, r0, EDtrAddr(r1, EDtrOffReg(r2))) == 0x0002f831u);  // ldrh  r0,[r1,r2]
+    check(ext(IsLoad,   8, true,  r0, EDtrAddr(r1, EDtrOffImm(4)))  == 0x0004f991u);  // ldrsb r0,[r1,#4]
+    check(ext(IsLoad,  16, true,  r0, EDtrAddr(r1, EDtrOffReg(r2))) == 0x0002f931u);  // ldrsh r0,[r1,r2]
+    // LDRD / STRD immediate (imm8 x4).
+    check(ext(IsLoad,  64, true,  r0, EDtrAddr(r2, EDtrOffImm(8)))  == 0x0102e9d2u);  // ldrd r0,r1,[r2,#8]
+    check(ext(IsStore, 64, true,  r0, EDtrAddr(r2, EDtrOffImm(8)))  == 0x0102e9c2u);  // strd r0,r1,[r2,#8]
+    check(ext(IsLoad,  64, true,  r0, EDtrAddr(r2, EDtrOffImm(0)))  == 0x0100e9d2u);  // ldrd r0,r1,[r2]
+    // Execute #1: strd r2,r3,[sp,#-16] ; ldrd r0,r1,[sp,#-16] ; bx lr  ->  r0=arg2 (red zone).
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        uint16_t prog[8];
+        prog[0] = 0xe94du; prog[1] = 0x2304u;   // strd r2,r3,[sp,#-16]
+        prog[2] = 0xe95du; prog[3] = 0x0104u;   // ldrd r0,r1,[sp,#-16]
+        prog[4] = 0x4770u;                       // bx lr
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        // sim->call returns r0; check r0 == arg2 (0xaabbccdd).
+        check(uint32_t(sim->call(e, 4, 0, 0, 0xaabbccddu, 0x11223344u)) == 0xaabbccddu);
+    }
+    // Execute #2: sign-extension. strh r1,[sp,#-4] ; ldrsh r0,[sp,#-4] ; bx lr.  r1=0x8001 -> r0=0xffff8001.
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        uint16_t prog[8];
+        prog[0] = 0xf82du; prog[1] = 0x1c04u;   // strh r1,[sp,#-4]
+        prog[2] = 0xf93du; prog[3] = 0x0c04u;   // ldrsh r0,[sp,#-4]
+        prog[4] = 0x4770u;                       // bx lr
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        check(uint32_t(sim->call(e, 2, 0, 0x00008001u)) == 0xffff8001u);
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2Vldr(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- VLDR/VSTR (as_vdtr), un-deferred. A standard VFP word: T2 == A32 with cond AL,
+    // halfword-swapped, so it funnels through varanEmitVfp like every other VFP op. Byte-match against
+    // clang thumbv7 objdump, then execute a vldr/vstr round-trip that carries an 8-byte double through
+    // a VFP register. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto vdtr = [&](LoadStore ls, VFPRegister vd, Register base, int off) -> uint32_t {
+        int o = masm.nextOffset().getOffset();
+        masm.as_vdtr(ls, vd, VFPAddr(base, VFPOffImm(off)), Assembler::Always);
+        return masm.varanPeekWord(o);
+    };
+    check(vdtr(IsLoad,  d0, r1,  8) == 0x0b02ed91u);   // vldr d0,[r1,#8]
+    check(vdtr(IsStore, d0, r1,  8) == 0x0b02ed81u);   // vstr d0,[r1,#8]
+    check(vdtr(IsLoad,  ReturnFloat32Reg, r1,  8) == 0x0a02ed91u);   // vldr s0,[r1,#8] (s0 = d0 single overlay)
+    check(vdtr(IsLoad,  d0, r1, -8) == 0x0b02ed11u);   // vldr d0,[r1,#-8]
+    check(vdtr(IsLoad,  d0, r1,  0) == 0x0b00ed91u);   // vldr d0,[r1]
+    // Execute: str the two halves to [sp,#-8]/[sp,#-4] ; vldr d0,[sp,#-8] ; vstr d0,[sp,#-16] ;
+    // ldr r0,[sp,#-16] -> r0 = the low word (arg1), proving the 8 bytes rode through the VFP reg.
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        uint16_t prog[16];
+        prog[0]  = 0xf84du; prog[1]  = 0x1c08u;   // str  r1,[sp,#-8]
+        prog[2]  = 0xf84du; prog[3]  = 0x2c04u;   // str  r2,[sp,#-4]
+        prog[4]  = 0xed1du; prog[5]  = 0x0b02u;   // vldr d0,[sp,#-8]
+        prog[6]  = 0xed0du; prog[7]  = 0x0b04u;   // vstr d0,[sp,#-16]
+        prog[8]  = 0xf85du; prog[9]  = 0x0c10u;   // ldr  r0,[sp,#-16]
+        prog[10] = 0x4770u;                        // bx lr
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        check(uint32_t(sim->call(e, 3, 0, 0x12345678u, 0x9abcdef0u)) == 0x12345678u);
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2Pool(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- the constant pool. loadConstantDouble(non-encodable) routes through as_FImm64Pool;
+    // finishPool patches the hint to a real T2 VLDR-literal and lays the 8-byte constant into the pool.
+    // Decode the patched VLDR's pc-relative offset and confirm it lands EXACTLY on the pool slot holding
+    // the double -- a -8 (A32) vs -4 (T2) pc-bias error, or a bad index round-trip, points at the wrong
+    // word (silent wrong constant). Plus the PoolHintData index round-trip + alias-guard headroom.
+    // Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // (A) PoolHintData index round-trip + alias-guard headroom (ISA-independent bookkeeping).
+    check(Assembler::varanPoolHintSelfTest() == 0);
+
+    // (B) End-to-end: emit a double via the pool, finish, and verify the patched VLDR reaches the const.
+    {
+        js::LifoAlloc lifo(1 << 16);
+        TempAllocator alloc(&lifo);
+        JitContext jc(cx, &alloc);
+        AutoFlushICache afc("varanT2Pool");                  // executableCopy's pool patch flushes the I-cache
+        MacroAssembler masm;
+        const double K = 3.14159265358979;                 // not VFP-immediate-encodable -> forced to pool
+        masm.loadConstantDouble(K, d0);
+        masm.finish();                                       // flush()es the pending pool + patches the VLDR
+        check(!masm.oom());
+        size_t n = masm.size();
+        check(n >= 8);
+        if (!masm.oom() && n >= 8 && n <= 480) {
+            uint8_t buf[512];
+            memset(buf, 0, sizeof(buf));
+            masm.executableCopy(buf);
+            // buf[0] is the patched VLDR d0,[pc,#imm]: stored (hw1<<16)|hw0, hw0=0xED9F(U=1)/0xED1F(U=0).
+            uint32_t vldr; memcpy(&vldr, buf, 4);
+            uint32_t hw0 = vldr & 0xffff, hw1 = (vldr >> 16) & 0xffff;
+            check((hw0 & 0xff7f) == 0xed1f);                 // VLDR d,[pc,#imm] literal (U masked out)
+            uint32_t U = (hw0 >> 7) & 1;
+            int32_t imm = int32_t((hw1 & 0xff) << 2);
+            // T2 pc = Align(vldrAddr+4,4); vldrAddr is 4-aligned here (buffer start).
+            uintptr_t base = reinterpret_cast<uintptr_t>(buf);
+            uintptr_t pcAligned = (base + 4) & ~uintptr_t(3);
+            uintptr_t target = U ? (pcAligned + imm) : (pcAligned - imm);
+            check(target + 8 <= base + n);                   // in-bounds
+            if (target + 8 <= base + n) {
+                double got; memcpy(&got, reinterpret_cast<void*>(target), 8);
+                check(got == K);                              // the pool holds exactly K at the -4 bias
+            }
+        }
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2Toggle(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- ToggleCall/ToggledCallSize over the toggled-call sequence movw/movt(ScratchReg) +
+    // {NOP.W | packed BLXReg}. No logic change was needed (it composes over the now-T2 InstMovW/InstNOP/
+    // InstBLXReg classifiers); this proves the round-trip disabled->enabled->disabled and the size.
+    // Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // B1 (Batch D): toggledCall now emits movw / movt / orr scratch,#1 / (blx|nop) -- the Thumb-bit
+    // orr is unconditional in BOTH arms so the footprint stays uniform and the toggled word stays
+    // last. Mirror that shape here, or this test would pin the OLD 3-word layout and read as a
+    // regression. (orr.w r12,r12,#1 = 4c f0 01 0c, LLVM-oracle minted.)
+    alignas(4) uint32_t buf[4];
+    buf[0] = 0x2c34f241u;   // movw r12, #0x1234   (ScratchRegister = ip = r12)
+    buf[1] = 0x6c78f2c5u;   // movt r12, #0x5678
+    buf[2] = 0x0c01f04cu;   // orr.w r12, r12, #1  (the Thumb bit)
+    buf[3] = 0x8000F3AFu;   // NOP.W  (disabled toggled call)
+    uint8_t* code = reinterpret_cast<uint8_t*>(buf);
+    auto at2 = [&]() -> Instruction* { return reinterpret_cast<Instruction*>(&buf[3]); };
+
+    AutoFlushICache afc("varanT2Toggle");
+    check(Assembler::ToggledCallSize(code) == 16);   // movw + movt + orr + slot
+    check(InstNOP::IsTHIS(*at2()));                   // starts disabled
+    // disabled -> enabled: the slot becomes a packed BLX ScratchRegister.
+    Assembler::ToggleCall(CodeLocationLabel(code), true);
+    check(InstBLXReg::IsTHIS(*at2()));
+    check(at2()->is<InstBranchReg>());
+    check(at2()->as<InstBranchReg>()->checkDest(ScratchRegister));
+    // enabled -> disabled: back to NOP.W.
+    Assembler::ToggleCall(CodeLocationLabel(code), false);
+    check(InstNOP::IsTHIS(*at2()));
+    check(buf[3] == 0x8000F3AFu);
+    // idempotent no-op re-toggle to the same state.
+    Assembler::ToggleCall(CodeLocationLabel(code), false);
+    check(InstNOP::IsTHIS(*at2()));
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2ToggleJump(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch A -- the TOGGLED-JUMP redesign (ToggleToJmp/ToggleToCmp). A32 flips bits[27:20] of
+    // one word between CMP and B; Thumb-2 has no such analogue, so toggledJump now lays a 2-slot site
+    // whose branch word is never modified:
+    //     slot0 = NOP.W  -> fall into slot1 -> branch TAKEN (enabled)
+    //     slot0 = B.W +4 -> skip slot1      -> fall through (disabled)
+    // A passing assert is NOT proof, so this EXECUTES the site under the simulator and checks that
+    // control actually flows both ways, across a full enabled->disabled->enabled round trip.
+    // Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // byte 0 : slot0 (toggle slot, wide)
+    // byte 4 : slot1 = B.W +8 -> Lskip.  PC = 4+4 = 8, target = 16, so off = 8.
+    // byte 8 : mov.w r0,#1                       (fallthrough / DISABLED result)
+    // byte 12: bx lr ; nop16 pad (keeps Lskip 4-aligned)
+    // byte 16: mov.w r0,#2  (Lskip / ENABLED result)
+    // byte 20: bx lr
+    // Wide forms are used for the movs because the wide-only invariant means the simulator implements
+    // only NOP16/BX/BLX/BKPT on the 16-bit path -- a 16-bit `movs r0,#1` loud-crashes there.
+    // All words below are LLVM-oracle byte-matched: nop.w = af f3 00 80, b.w .+12 = 00 f0 04 b8,
+    // mov.w r0,#N = 4f f0 0N 00.
+    // slot1's branch word (B.W +8 = 0xB804F000) is deliberately DIFFERENT from the skip word the
+    // toggle writes into slot0 (B.W +4 = 0xB802F000) so that a toggle which scribbled on the wrong
+    // slot cannot coincidentally still pass.
+    alignas(4) uint16_t prog[12];
+    prog[0]  = 0xF3AFu; prog[1]  = 0x8000u;   // slot0: NOP.W (enabled)
+    prog[2]  = 0xF000u; prog[3]  = 0xB804u;   // slot1: B.W +8 -> Lskip
+    prog[4]  = 0xF04Fu; prog[5]  = 0x0001u;   // mov.w r0,#1
+    prog[6]  = 0x4770u;                        // bx lr
+    prog[7]  = 0xBF00u;                        // nop16 pad
+    prog[8]  = 0xF04Fu; prog[9]  = 0x0002u;   // Lskip: mov.w r0,#2
+    prog[10] = 0x4770u;                        // bx lr
+    prog[11] = 0xBF00u;                        // nop16 pad
+
+    uint8_t* base  = reinterpret_cast<uint8_t*>(prog);
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+    Simulator* sim = cx->runtime()->simulator();
+    AutoFlushICache afc("varanT2ToggleJump");
+
+    // As emitted: enabled -> the jump is taken -> 2.
+    check(uint32_t(sim->call(entry, 1, 0)) == 2u);
+    // Disable: control must now fall through -> 1. slot1 must be untouched.
+    Assembler::ToggleToCmp(CodeLocationLabel(base));
+    check(uint32_t(sim->call(entry, 1, 0)) == 1u);
+    check(prog[2] == 0xF000u && prog[3] == 0xB804u);
+    // Re-enable: back to the jump -> 2. This is the direction the A32 code could only achieve by
+    // reconstructing the offset from the CMP's fields; here slot1 never lost it.
+    Assembler::ToggleToJmp(CodeLocationLabel(base));
+    check(uint32_t(sim->call(entry, 1, 0)) == 2u);
+    check(prog[0] == 0xF3AFu && prog[1] == 0x8000u);
+    check(prog[2] == 0xF000u && prog[3] == 0xB804u);
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2ShiftReg(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch B item 1 -- register-CONTROLLED shift (census 0x11d, the hottest gap).
+    // `ma_lsl/ma_lsr/ma_asr/ma_ror(Register shift, ...)` -> `as_mov(dst, lsl(src, shift))`, i.e. an
+    // A32 op2 with bit4 = 1. Thumb-2 has NO register-controlled-shift form of general data
+    // processing, only the dedicated LSL/LSR/ASR/ROR (register) instructions, so it is SYNTHESISED:
+    // OpMov emits the dedicated shift directly; any other op shifts into ip first.
+    //
+    // NB the batch brief said this decodes via case (1) 0x75; tree-truth is 0x7d -- `lsl.w` is
+    // 0xFA0x, so a NEW simulator sub-case was required, placed ahead of the extend ops it shares a
+    // band with. Byte values below are LLVM-oracle minted. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto emit1 = [&](ShiftType) { return 0u; };
+    (void)emit1;
+
+    // --- ENCODE: the four OpMov forms are ONE instruction each (no scratch) ---
+    auto one = [&](Operand2 o2, SBit s) -> uint32_t {
+        int o = masm.nextOffset().getOffset();
+        masm.as_mov(r0, o2, s);
+        return masm.varanPeekWord(o);
+    };
+    check(one(lsl(r1, r2), LeaveCC) == 0xF002FA01u);   // lsl.w r0,r1,r2   01 fa 02 f0
+    check(one(lsr(r1, r2), LeaveCC) == 0xF002FA21u);   // lsr.w r0,r1,r2   21 fa 02 f0
+    check(one(asr(r1, r2), LeaveCC) == 0xF002FA41u);   // asr.w r0,r1,r2   41 fa 02 f0
+    check(one(ror(r1, r2), LeaveCC) == 0xF002FA61u);   // ror.w r0,r1,r2   61 fa 02 f0
+    {   // S-bit form, distinct registers: asrs.w r3,r4,r5   54 fa 05 f3
+        int o = masm.nextOffset().getOffset();
+        masm.as_mov(r3, asr(r4, r5), SetCC);
+        check(masm.varanPeekWord(o) == 0xF305FA54u);
+    }
+    {   // --- non-Mov op: shift into ip, then the ordinary register-form ALU on ip ---
+        int o = masm.nextOffset().getOffset();
+        masm.as_add(r0, r1, lsl(r2, r3));
+        check(masm.varanPeekWord(o)     == 0xFC03FA02u);   // lsl.w r12,r2,r3   02 fa 03 fc
+        check(masm.varanPeekWord(o + 4) == 0x000CEB01u);   // add.w r0,r1,r12   01 eb 0c 00
+    }
+    check(!masm.oom());
+
+    // --- EXECUTE: the shifts must produce correct VALUES, including the >=32 edge cases that the
+    // A32 "low byte of Rs" rule makes reachable (a naive `<< amt` in the simulator is UB there).
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        // r0 = value, r1 = amount -> returns the shifted result.
+        auto run = [&](uint32_t hw0, uint32_t hw1, uint32_t val, uint32_t amt) -> uint32_t {
+            alignas(4) uint16_t prog[4];
+            prog[0] = uint16_t(hw0); prog[1] = uint16_t(hw1);   // <shift>.w r0, r0, r1
+            prog[2] = 0x4770u;                                   // bx lr
+            prog[3] = 0xBF00u;
+            uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+            return uint32_t(sim->call(e, 2, int32_t(val), int32_t(amt)));
+        };
+        // hw0 = 0xFA00|(type<<5)|Rn(=0) ; hw1 = 0xF000|(Rd(=0)<<8)|Rm(=1)
+        const uint32_t HW1 = 0xF001u;
+        check(run(0xFA00u, HW1, 0x00000001u,  4) == 0x00000010u);   // lsl 1<<4
+        check(run(0xFA20u, HW1, 0x80000000u,  4) == 0x08000000u);   // lsr
+        check(run(0xFA40u, HW1, 0x80000000u,  4) == 0xF8000000u);   // asr keeps sign
+        check(run(0xFA60u, HW1, 0x00000001u,  1) == 0x80000000u);   // ror wraps
+        check(run(0xFA00u, HW1, 0xFFFFFFFFu, 32) == 0x00000000u);   // lsl by 32 -> 0 (not UB)
+        check(run(0xFA00u, HW1, 0xFFFFFFFFu, 40) == 0x00000000u);   // lsl by >32 -> 0
+        check(run(0xFA40u, HW1, 0x80000000u, 40) == 0xFFFFFFFFu);   // asr by >32 -> sign fill
+        check(run(0xFA20u, HW1, 0xFFFFFFFFu,  0) == 0xFFFFFFFFu);   // amount 0 is a no-op
+        check(run(0xFA60u, HW1, 0x12345678u, 32) == 0x12345678u);   // ror by 32 == identity
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2CondDtrDtm(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch B items 2+3 -- conditional load/store (census 0x24e) and the as_dtm synth (0x28b).
+    //
+    // (2) A conditional ldr/str becomes B<!c>.W branch-over an unconditional body. The body is NOT a
+    //     fixed size (the register-offset synth expands to 3 instructions), so the branch is emitted
+    //     as a placeholder and PATCHED with the real skip -- this test pins that the patched skip
+    //     actually equals the emitted body size, which is the whole failure mode.
+    // (3) as_dtm DA/IB/rejected-list becomes per-register ldr/str, lowest-register-to-lowest-address.
+    //
+    // Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // --- (2) conditional ldr: branch-over, and the skip must match the body exactly ---
+    {
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        masm.ma_ldr(DTRAddr(r1, DtrOffImm(8)), r0, Offset, Assembler::Equal);
+        int end = masm.nextOffset().getOffset();
+        uint32_t br = masm.varanPeekWord(o);
+        // B<c>.W T3: hw0 = 0xF000|(S<<10)|(cond<<6)|imm6 ; hw1 = 0x8000|(J1<<13)|(J2<<11)|imm11.
+        // cond must be NotEqual (1) = the inversion of Equal (0).
+        check((br & 0xf800u) == 0xf000u);
+        check(((br >> 6) & 0xfu) == 1u);                       // inverted condition
+        int32_t bodyBytes = end - o - 4;
+        int32_t imm11 = int32_t((br >> 16) & 0x7ffu);
+        check(imm11 * 2 == bodyBytes);                          // the PATCHED skip == real body size
+        check(bodyBytes == 4);                                  // simple imm offset -> 1-insn body
+        check(!masm.oom());
+    }
+    {   // register-offset form: body is 3 instructions, so the skip must be 12 -- the case a
+        // hardcoded skip of 4 would have silently broken.
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        masm.ma_ldr(DTRAddr(r1, DtrRegImmShift(r2, LSL, 2)), r0, Offset, Assembler::Equal);
+        int end = masm.nextOffset().getOffset();
+        uint32_t br = masm.varanPeekWord(o);
+        int32_t imm11 = int32_t((br >> 16) & 0x7ffu);
+        check(imm11 * 2 == end - o - 4);
+        check(!masm.oom());
+    }
+    {   // as_alu's conditional arm has the same variable-body hazard once the register-CONTROLLED
+        // shift synth exists (2-instruction body for a non-Mov op). Pin its patched skip too.
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        masm.as_add(r0, r1, lsl(r2, r3), LeaveCC, Assembler::Equal);
+        int end = masm.nextOffset().getOffset();
+        uint32_t br = masm.varanPeekWord(o);
+        int32_t imm11 = int32_t((br >> 16) & 0x7ffu);
+        check(imm11 * 2 == end - o - 4);
+        check(end - o - 4 == 8);                                // lsl.w ip + add.w  = 2 instructions
+        check(!masm.oom());
+    }
+
+    // --- (3) as_dtm synth: DA/IB expand to per-register ldr/str, no UDF ---
+    auto udfWord = [](uint32_t c) -> uint32_t {
+        return ((0xa000u | (c & 0xfff)) << 16) | (0xf7f0u | ((c >> 12) & 0xf));
+    };
+    for (int mi = 0; mi < 2; mi++) {
+        MacroAssembler masm;
+        DTMMode mode = mi ? IB : DA;
+        int o = masm.nextOffset().getOffset();
+        masm.startDataTransferM(IsLoad, r0, mode);
+        masm.transferReg(r1);
+        masm.transferReg(r2);
+        masm.finishDataTransfer();
+        int end = masm.nextOffset().getOffset();
+        check(end - o == 8);                                    // exactly 2 loads, no UDF
+        check(masm.varanPeekWord(o)     != udfWord(0x28b));
+        check(masm.varanPeekWord(o + 4) != udfWord(0x28b));
+        check(!masm.oom());
+    }
+
+    // --- (3) EXECUTE: DA must transfer lowest-register-to-lowest-address ---
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        // ldrda-equivalent over {r1,r2} with base r0: lowest address = r0-4, so r1<-[r0-4], r2<-[r0].
+        // Program: str the two markers below r0, run the synth shape, return r1+r2 packed.
+        alignas(4) uint32_t mem[2] = { 0x1111u, 0x2222u };
+        alignas(4) uint16_t prog[8];
+        // ldr r1,[r0,#0] ; ldr r2,[r0,#4] ; add r0,r1,r2 ; bx lr   (the DA lowering, base = &mem[0])
+        prog[0] = 0xF8D0u; prog[1] = 0x1000u;   // ldr.w r1,[r0,#0]
+        prog[2] = 0xF8D0u; prog[3] = 0x2004u;   // ldr.w r2,[r0,#4]
+        prog[4] = 0xEB01u; prog[5] = 0x0002u;   // add.w r0,r1,r2
+        prog[6] = 0x4770u;                       // bx lr
+        prog[7] = 0xBF00u;
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        check(uint32_t(sim->call(e, 1, int32_t(uintptr_t(mem)))) == 0x3333u);
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2MrsMsr(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch B item 4 -- MRS/MSR (census 0x210 / 0x212), the ONE item that needed a genuinely
+    // new 32-bit decode case. Sole caller is wasm::GenerateInterruptExit (the APSR save/restore
+    // pair). Byte-match both, then EXECUTE a flags round-trip through the simulator: set flags with a
+    // compare, read them out with MRS, clobber them, restore with MSR, and observe the restored
+    // condition actually steer a branch. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    {   // ENCODE: mrs r4, apsr = ef f3 00 84 ; msr apsr_nzcvq, r4 = 84 f3 00 88
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        masm.as_mrs(r4);
+        check(masm.varanPeekWord(o) == 0x8400F3EFu);
+        o = masm.nextOffset().getOffset();
+        masm.as_msr(r4);
+        check(masm.varanPeekWord(o) == 0x8800F384u);
+        check(!masm.oom());
+    }
+
+    {   // EXECUTE: flags -> MRS -> clobber -> MSR -> the restored Z must still steer the branch.
+        Simulator* sim = cx->runtime()->simulator();
+        // Wide forms throughout: the wide-only invariant means the simulator implements only
+        // NOP16/BX/BLX/BKPT on the 16-bit path, so a 16-bit `cmp`/`movs` would loud-crash there.
+        // Byte order below is halfword-in-memory; all oracle-minted.
+        //   byte 0 : cmp.w r0, r1        b0 eb 01 0f   (sets flags)
+        //   byte 4 : mrs r3, apsr        ef f3 00 83   (save)
+        //   byte 8 : cmp.w r2, #0x63     b2 f1 63 0f   (clobber flags)
+        //   byte 12: msr apsr_nzcvq, r3  83 f3 00 88   (restore)
+        // r3, not r4: Simulator::call asserts the callee-saved registers (r4-r11) come back intact,
+        // so the scratch here has to be caller-saved. r0-r2 carry the arguments, leaving r3.
+        //   byte 16: beq.w -> byte 28    B<c>.W cond=0(EQ), off = 28-(16+4) = 8 -> imm11 = 4
+        //   byte 20: mov.w r0, #0        4f f0 00 00   (Z clear -> not equal)
+        //   byte 24: bx lr ; pad
+        //   byte 28: mov.w r0, #1                       (Z set   -> equal)
+        //   byte 32: bx lr ; pad
+        alignas(4) uint16_t prog[18];
+        int k = 0;
+        prog[k++] = 0xEBB0u; prog[k++] = 0x0F01u;   // b0  cmp.w r0, r1
+        prog[k++] = 0xF3EFu; prog[k++] = 0x8300u;   // b4  mrs r3, apsr
+        prog[k++] = 0xF1B2u; prog[k++] = 0x0F63u;   // b8  cmp.w r2, #0x63
+        prog[k++] = 0xF383u; prog[k++] = 0x8800u;   // b12 msr apsr_nzcvq, r3
+        prog[k++] = 0xF000u; prog[k++] = 0x8004u;   // b16 beq.w -> b28
+        prog[k++] = 0xF04Fu; prog[k++] = 0x0000u;   // b20 mov.w r0, #0
+        prog[k++] = 0x4770u; prog[k++] = 0xBF00u;   // b24 bx lr ; pad
+        prog[k++] = 0xF04Fu; prog[k++] = 0x0001u;   // b28 mov.w r0, #1
+        prog[k++] = 0x4770u; prog[k++] = 0xBF00u;   // b32 bx lr ; pad
+        MOZ_ASSERT(size_t(k) == mozilla::ArrayLength(prog));
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        // r0 == r1 -> Z set at the cmp; the clobbering cmp clears it; MSR must bring it back.
+        check(uint32_t(sim->call(e, 3, 7, 7, 1)) == 1u);
+        // r0 != r1 -> Z clear; MSR must restore THAT too (not just leave the clobbered value).
+        check(uint32_t(sim->call(e, 3, 7, 9, 0x63)) == 0u);
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2C7Bit(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch F -- C7: the Thumb bit on SYNTHESIZED code addresses.
+    //
+    // These are built in C++ as `code->raw() + offset` and branched through by `ldr pc` / `bx lr`,
+    // where there is NO branch-time register for B1 to OR. NON-VACUOUS: each check asserts the
+    // address is ODD *and* differs from the even value the old code produced, so a regression fails
+    // on a comparison rather than merely not crashing. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    JitRuntime* jrt = cx->runtime()->jitRuntime();
+    if (!jrt) {                       // JIT not initialised in this shell configuration
+        args.rval().setInt32(-1);
+        return true;
+    }
+
+    // P4 -- the arguments rectifier's *returnAddrOut. Consumed by ret() = `ldr.w pc,[sp],#4`.
+    {
+        void* ra = jrt->getArgumentsRectifierReturnAddr();
+        check(ra != nullptr);
+        check((uintptr_t(ra) & 1) == 1);                    // odd: carries the Thumb bit
+    }
+
+    // P8 -- the DebugModeOSR handler address, BOTH arms. Consumed by the VM wrapper's retn().
+    {
+        void* a = cx->runtime()->jitRuntime()->getBaselineDebugModeOSRHandlerAddress(cx, true);
+        void* b = cx->runtime()->jitRuntime()->getBaselineDebugModeOSRHandlerAddress(cx, false);
+        check(a && (uintptr_t(a) & 1) == 1);
+        check(b && (uintptr_t(b) & 1) == 1);
+        // Non-vacuous the other way too: the even form is what the pre-C7 code returned, so an
+        // unfixed build would land exactly on (addr & ~1).
+        check(a != (void*)(uintptr_t(a) & ~uintptr_t(1)));
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2EmitGuards(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch E STEP 5 -- the emit-contract guards. NON-VACUOUS IN BOTH DIRECTIONS, which is the
+    // whole point: a guard that never fires is useless, and a guard that fires on legal code is worse
+    // than no guard at all. The six T32 special forms encode a 15 legitimately (CMP/CMN/TST/TEQ put
+    // Rd=1111; MOV/MVN put Rn=1111), so the SILENT half of this test is the half that matters.
+    // Returns fails (0 = pass).
+    //
+    // ARGUMENT REQUIRED -- same reason as varanT2Udf, and found the same way. This test emits five
+    // coded UDFs ON PURPOSE (0x501/0x502/0x503/0x511/0x512), and `basic/bug908915.js` is a shotgun
+    // that calls EVERY shell testing function with no arguments. So the emit-time census -- whose
+    // whole job is to report which ENCODER GAPS the corpus reaches -- was reporting OUR OWN TEST
+    // HOOK as if it were product code. Requiring an argument makes the bare call a no-op, so the
+    // census measures the product and not the instrument. Returns -2 on a bare call rather than 0,
+    // so a sweep that forgets the argument fails loudly instead of passing vacuously.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() < 1) {
+        args.rval().setInt32(-2);
+        return true;
+    }
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    auto udf = [](uint32_t c) -> uint32_t {
+        return ((0xa000u | (c & 0xfff)) << 16) | (0xf7f0u | ((c >> 12) & 0xf));
+    };
+    // Emit one thing, return its first word.
+    auto emit1 = [&](void (*fn)(MacroAssembler&)) -> uint32_t {
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        fn(masm);
+        return masm.varanPeekWord(o);
+    };
+
+    // ---- MUST TRIP ----
+    check(emit1([](MacroAssembler& m) { m.as_add(pc, r0, O2Reg(r1)); })        == udf(0x501)); // Rd=PC
+    check(emit1([](MacroAssembler& m) { m.as_add(r0, pc, O2Reg(r1)); })        == udf(0x502)); // Rn=PC
+    check(emit1([](MacroAssembler& m) { m.as_add(r0, r1, O2Reg(pc)); })        == udf(0x503)); // Rm=PC
+    check(emit1([](MacroAssembler& m) {                                                        // Rs=PC
+        m.as_mov(r0, O2RegRegShift(r1, LSL, pc)); })                           == udf(0x503));
+    check(emit1([](MacroAssembler& m) {                                                        // str pc
+        m.as_dtr(IsStore, 32, Offset, pc, DTRAddr(r0, DtrOffImm(4))); })       == udf(0x511));
+    check(emit1([](MacroAssembler& m) {                                                        // sub-word ldr pc
+        m.as_dtr(IsLoad, 8, Offset, pc, DTRAddr(r0, DtrOffImm(4))); })         == udf(0x511));
+    check(emit1([](MacroAssembler& m) {                                                        // ldr rt,[pc,rm]
+        m.as_dtr(IsLoad, 32, Offset, r0, DTRAddr(pc, DtrRegImmShift(r1, LSL, 0))); })
+                                                                               == udf(0x512));
+
+    // ---- MUST STAY SILENT (the legal special forms, and the legal ldr pc) ----
+    auto notUdf = [&](uint32_t w) { return (w & 0xfff0u) != 0xf7f0u || ((w >> 16) & 0xf000u) != 0xa000u; };
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_cmp(r0, Imm8(1)); })));      // CMP: Rd=1111 legal
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_cmn(r0, Imm8(1)); })));      // CMN
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_tst(r0, Imm8(1)); })));      // TST
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_teq(r0, Imm8(1)); })));      // TEQ
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_mov(r0, Imm8(1)); })));      // MOV: Rn=1111 legal
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_mvn(r0, Imm8(1)); })));      // MVN
+    check(notUdf(emit1([](MacroAssembler& m) { m.as_mov(r0, O2Reg(r1)); })));    // MOV reg form
+    // `ldr.w pc,[sp],#4` IS legal and LIVE (ret() -> ma_pop(pc)) -- D1 must not touch it.
+    check(notUdf(emit1([](MacroAssembler& m) {
+        m.as_dtr(IsLoad, 32, PostIndex, pc, DTRAddr(sp, DtrOffImm(4))); })));
+    // farJumpWithPatch's legal pc-base literal load: mode == Offset && U == 1. D3 must not fire.
+    check(notUdf(emit1([](MacroAssembler& m) {
+        m.as_dtr(IsLoad, 32, Offset, r0, DTRAddr(pc, DtrOffImm(0))); })));
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2AdrOsr(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch C -- ADR (T3) and the OSR return-address shape it exists for.
+    //
+    // generateEnterJIT's OSR path must materialise the address of its own `b returnLabel` and store
+    // it as the frame's return address. The A32 sequence was `mov scratch, pc; add scratch, #8`,
+    // which is wrong for Thumb-2 twice over: PC reads Align(insn+4,4) rather than insn+8 (so +8
+    // lands one instruction short), and `mov.w rd, pc` has no legal encoding at all. ADR is the only
+    // legal wide PC-relative materialisation.
+    //
+    // DISCRIMINATING by construction: the program below is the exact OSR shape, and the expected
+    // value is the address of the 4th word WITH the Thumb bit. The A32 arithmetic would land on the
+    // 3rd word (`b skipJump`) and an unset bit0 -- both are distinguishable values, not crashes, so
+    // this test fails loudly on a regression instead of merely not crashing. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    {   // ENCODE: addw r1, pc, #9 = 0f f2 09 01  (LLVM-oracle minted)
+        MacroAssembler masm;
+        int o = masm.nextOffset().getOffset();
+        masm.as_adr(r1, 2 * sizeof(uint32_t) + 1);
+        check(masm.varanPeekWord(o) == 0x0109F20Fu);
+        o = masm.nextOffset().getOffset();
+        masm.as_adr(r0, 2 * sizeof(uint32_t) + 1);
+        check(masm.varanPeekWord(o) == 0x0009F20Fu);
+        check(!masm.oom());
+    }
+
+    {   // EXECUTE the OSR shape:
+        //   +0  addw r0, pc, #9   -> Align(0+4,4) + 9 = 13 = 12|1
+        //   +4  bx lr             (stands in for `str scratch,[sp]`)
+        //   +8  nop.w             (stands in for `b skipJump`)
+        //   +12 nop.w             (stands in for `b returnLabel`  <- the address we want)
+        Simulator* sim = cx->runtime()->simulator();
+        alignas(4) uint16_t prog[8];
+        prog[0] = 0xF20Fu; prog[1] = 0x0009u;   // addw r0, pc, #9
+        prog[2] = 0x4770u; prog[3] = 0xBF00u;   // bx lr ; pad
+        prog[4] = 0xF3AFu; prog[5] = 0x8000u;   // nop.w
+        prog[6] = 0xF3AFu; prog[7] = 0x8000u;   // nop.w
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        uint32_t got  = uint32_t(sim->call(e, 1, 0));
+        uint32_t base = uint32_t(uintptr_t(prog));
+        check(got == base + 12 + 1);        // 4th word, Thumb bit set
+        check(got != base + 8 + 1);         // NOT the 3rd word -- the A32 +8 landing spot
+        check((got & 1) == 1);              // F2: the Thumb bit is actually present
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2PcLiteral(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch A -- the simulator's PC-READ BASE. Thumb-2 reads PC as Align(insn+4,4); the A32
+    // value (SimInstruction::kPCReadOffset == 8) is +4 too high, which silently loads the WRONG WORD
+    // for every pc-relative literal -- including the live VLDR-literal constant pool (ma_vimm ->
+    // as_FImm64Pool). No pre-existing self-test exercised a pc-relative base: varanT2Vldr and
+    // varanT2LoadStore both execute with sp/r1 bases, which is exactly why this survived.
+    //
+    // The program is a DISCRIMINATOR, not just a smoke test: the correct word and the word the old
+    // +8 base would have loaded are both present and distinct, so a regression yields 0xDEADBEEF
+    // rather than a crash. Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // byte 0 : ldr r0,[pc,#4]   (LDR literal T2: hw0 = 0xF8DF (U=1), hw1 = (Rt<<12)|imm12)
+    //          T2 base = Align(0+4,4) = 4 -> address 4+4 = 8   -> 0xCAFEBABE  (correct)
+    //          A32 base = 0+8 = 8         -> address 8+4 = 12  -> 0xDEADBEEF  (the old bug)
+    // byte 4 : bx lr ; nop16
+    // byte 8 : 0xCAFEBABE
+    // byte 12: 0xDEADBEEF
+    alignas(4) uint16_t prog[8];
+    prog[0] = 0xF8DFu; prog[1] = 0x0004u;   // ldr r0,[pc,#4]
+    prog[2] = 0x4770u;                       // bx lr
+    prog[3] = 0xBF00u;                       // nop16 (pad to the 4-byte data boundary)
+    prog[4] = 0xBABEu; prog[5] = 0xCAFEu;   // 0xCAFEBABE
+    prog[6] = 0xBEEFu; prog[7] = 0xDEADu;   // 0xDEADBEEF
+
+    uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+    Simulator* sim = cx->runtime()->simulator();
+    check(uint32_t(sim->call(entry, 1, 0)) == 0xCAFEBABEu);
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2RegBranch(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- register branches (bx/blx/bkpt) + NOP.W. (A) byte-match the packed encodings.
+    // (B) the CRITICAL blx return-address test: blx16 is packed in the HIGH halfword so hardware LR =
+    // slot-end (= the recorded call site), NOT slot+2. A callee reads LR and we assert it equals the
+    // byte after the 4-byte blx slot, with the thumb bit -- a LOW packing would be 2 bytes short (a
+    // silent, GC-lethal safepoint skew). Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // (A) byte-match via a real MacroAssembler.
+    {
+        js::LifoAlloc lifo(1 << 16);
+        TempAllocator alloc(&lifo);
+        JitContext jc(cx, &alloc);
+        MacroAssembler masm;
+        int oNop = masm.nextOffset().getOffset(); masm.as_nop();
+        check(masm.varanPeekWord(oNop) == 0x8000F3AFu);            // NOP.W
+        int oBx  = masm.nextOffset().getOffset(); masm.as_bx(lr);
+        check(masm.varanPeekWord(oBx)  == 0x4770bf00u);            // bx lr  packed (NOP16 low)
+        int oBlx = masm.nextOffset().getOffset(); masm.as_blx(r1);
+        check(masm.varanPeekWord(oBlx) == 0x4788bf00u);            // blx r1 packed (blx16 HIGH)
+        int oBkpt = masm.nextOffset().getOffset(); masm.as_bkpt();
+        uint32_t bk = masm.varanPeekWord(oBkpt);
+        check((bk >> 16) == 0xbf00u && (bk & 0xff00u) == 0xbe00u); // bkpt: NOP16 high, bkpt low
+    }
+
+    // (B) blx LR-packing execution proof. Hand-laid; the callee captures LR via mov.w (16-bit hi-reg mov
+    // is not in the sim, so use the T2 form the 0x75 dispatch decodes).
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        uint16_t prog[16];
+        int nb = 0;
+        auto put32 = [&](uint32_t w){ prog[nb/2]=uint16_t(w&0xffff); prog[nb/2+1]=uint16_t(w>>16); nb+=4; };
+        auto put16 = [&](uint16_t w){ prog[nb/2]=w; nb+=2; };
+        put32(0x0c0eea4fu);   // 0:  mov.w r12, lr  (save sim ret in r12 -- caller-saved, not r4-r11)
+        put32(0x4788bf00u);   // 4:  blx r1 packed  (NOP16@4, BLX16@6; LR := slot-end(8)|1)
+        put16(0x4760u);       // 8:  bx r12         (callee returns here -> back to the sim via r12)
+        put32(0x000eea4fu);   // 10: mov.w r0, lr   (callee: r0 = LR)
+        put16(0x4770u);       // 14: bx lr          (callee returns to offset 8)
+        uintptr_t base = reinterpret_cast<uintptr_t>(prog);
+        uint8_t* entry = reinterpret_cast<uint8_t*>(base | 1);
+        int32_t callee = int32_t((base + 10) | 1);                 // r1 = callee entry (thumb bit)
+        int32_t r0 = int32_t(sim->call(entry, 2, 0, callee));
+        int32_t expected = int32_t((base + 8) | 1);                // LR == blx-slot-end | thumb bit
+        check(uint32_t(r0) == uint32_t(expected));
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2JumpPatch(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 4 -- the 2-slot patchable jump (jumpWithPatch/PatchJump/bind(RepatchLabel*)). (A) the
+    // shared VaranComputeJump2 writer across Always/cond, in-range + the >+-1MB overflow fallback, with a
+    // decode round-trip. (B) end-to-end: jumpWithPatch reserves [slot0,slot1]; bind(RepatchLabel*) patches
+    // the pair to fall through, and the decoded slot0/slot1 must land exactly at the bind point.
+    // Returns fails (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // (A) shared writer self-test (includes the >+-1MB invert+B.W overflow fallback).
+    check(Assembler::varanJumpPatch2SelfTest() == 0);
+
+    // (B) jumpWithPatch + bind(RepatchLabel*) through a real MacroAssembler. slot0 decode must land at
+    // the bind offset. Decode helper mirrors varanT2BranchBind (2-slot: overflow target lives in slot1).
+    {
+        js::LifoAlloc lifo(1 << 16);
+        TempAllocator alloc(&lifo);
+        JitContext jc(cx, &alloc);
+        MacroAssembler masm;
+        auto landing = [&](int bo) -> int {
+            uint32_t w0 = masm.varanPeekWord(bo);
+            uint32_t cond = 14u;
+            VaranDecodeBranchCond(w0, &cond);
+            if (VaranBranchKind(w0) == 1 && cond < 14) {
+                uint32_t w1 = masm.varanPeekWord(bo + 4);
+                if (VaranBranchKind(w1) == 1)
+                    return (bo + 4) + VaranDecodeBranchByteVal(w1);
+                return bo + VaranDecodeBranchByteVal(w0);
+            }
+            return bo + VaranDecodeBranchByteVal(w0);
+        };
+        // Unconditional patchable jump (backedgeJump shape). RepatchLabel::offset() asserts !bound(),
+        // so capture the bind point (== nextOffset) BEFORE binding.
+        RepatchLabel R;
+        CodeOffsetJump j = masm.jumpWithPatch(&R, Assembler::Always);
+        masm.as_movw(r0, Imm16(0));
+        masm.as_movw(r0, Imm16(0));
+        int Roff = masm.nextOffset().getOffset();
+        masm.bind(&R);
+        check(!masm.oom());
+        check(landing(j.offset()) == Roff);
+        // Conditional patchable jump.
+        RepatchLabel S;
+        CodeOffsetJump js = masm.jumpWithPatch(&S, Assembler::NotEqual);
+        masm.as_movw(r0, Imm16(0));
+        int Soff = masm.nextOffset().getOffset();
+        masm.bind(&S);
+        check(!masm.oom());
+        check(landing(js.offset()) == Soff);
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2PoolDefer(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN escape-closure: the A32 pool escape is now fully CLOSED. The double/float32 pool paths
+    // (ma_vimm/ma_vimm_f32, see varanT2Pool) and jumpWithPatch (see varanT2JumpPatch) are live
+    // Thumb-2, and Batch 4 converted the last holdout -- the patchable ABSOLUTE branch ma_b(void*) --
+    // from a coded wide UDF (0x3F2) to varanAbsBranch: movw ip / movt ip / bx ip.
+    //
+    // NB this test previously asserted the OLD 0x3F2 UDF and so had been silently failing (returning
+    // 1) ever since that conversion: a self-test asserting an obsolete deferral is worse than no test,
+    // because it reads as a live regression. Assert the converted reality instead.
+    // Returns failed-check count (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    // EncodeUdfT2(code): hw0 = 0xf7f0|((code>>12)&0xf), hw1 = 0xa000|(code&0xfff), stored (hw1<<16)|hw0.
+    auto udf = [](uint32_t c) -> uint32_t {
+        return ((0xa000u | (c & 0xfff)) << 16) | (0xf7f0u | ((c >> 12) & 0xf));
+    };
+
+    // (c) ma_b(void*) patchable absolute branch -> varanAbsBranch (movw ip / movt ip / bx ip).
+    // Structural checks via the classifiers rather than hard-coded words, so this stays honest if
+    // the immediate split ever changes.
+    (void)udf;
+    int o2 = masm.nextOffset().getOffset();
+    masm.ma_b(reinterpret_cast<void*>(uintptr_t(0x12345678)), Assembler::Always);
+    uint32_t w[3] = { masm.varanPeekWord(o2), masm.varanPeekWord(o2 + 4), masm.varanPeekWord(o2 + 8) };
+    auto I = [&](int k) { return reinterpret_cast<Instruction*>(&w[k]); };
+    check(I(0)->is<InstMovW>());
+    check(I(1)->is<InstMovT>());
+    check(I(2)->is<InstBranchReg>());
+    check(I(2)->as<InstBranchReg>()->checkDest(ScratchRegister));
+    // F2: the movw immediate must carry the Thumb interworking bit, or `bx ip` enters ARM state.
+    // imm8 occupies hw1[7:0], i.e. bits 23:16 of the stored word, so bit0 of the target is bit16.
+    check(((w[0] >> 16) & 1u) == 1u);
+    // No pool entry was allocated, so no word can alias a PoolHeader (top-16 == 0xffff).
+    for (int k = 0; k < 3; k++)
+        check((w[k] >> 16) != 0xffffu);
+    check(!masm.oom());
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2AluImm(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 1 -- ALU-immediate BYTE-MATCH. Drives the as_alu modimm seam and checks each emitted
+    // word against the oracle: the opcode table (K=0xff, Rd=r1, Rn=r2), the modified-immediate predicate
+    // on boundary constants (mov r0,#K -- pattern + rotation), a non-encodable constant -> UDF (predicate
+    // returned -1, cascade would fall to movw/movt), and the conditional -> B<!c>.W branch-over pair.
+    // Returns failed-check count (0 = pass).
+    //
+    // ARGUMENT REQUIRED -- see varanT2EmitGuards. The non-encodable-constant check below emits a
+    // coded UDF (0x10d) deliberately, and `basic/bug908915.js` calls every testing function with no
+    // arguments, which put our own scaffolding into the encoder-gap census. -2 on a bare call so a
+    // sweep that forgets the argument fails loudly rather than passing vacuously.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() < 1) {
+        args.rval().setInt32(-2);
+        return true;
+    }
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto emit = [&](Register d, Register n, uint32_t k, ALUOp op, SBit s) -> uint32_t {
+        int o = masm.nextOffset().getOffset();
+        masm.as_alu(d, n, Imm8(k), op, s, Assembler::Always);
+        return masm.varanPeekWord(o);
+    };
+    // Opcode table (K=0xff -> control 0x0ff; Rd=r1, Rn=r2). Oracle bytes from ENCODING-TABLES Batch 1 §4.
+    check(emit(r1, r2, 0xff, OpAnd, LeaveCC) == 0x01fff002u);
+    check(emit(r1, r2, 0xff, OpBic, LeaveCC) == 0x01fff022u);
+    check(emit(r1, r2, 0xff, OpOrr, LeaveCC) == 0x01fff042u);
+    check(emit(r1, r2, 0xff, OpEor, LeaveCC) == 0x01fff082u);
+    check(emit(r1, r2, 0xff, OpAdd, LeaveCC) == 0x01fff102u);
+    check(emit(r1, r2, 0xff, OpSub, LeaveCC) == 0x01fff1a2u);
+    check(emit(r1, InvalidReg, 0xff, OpMvn, LeaveCC) == 0x01fff06fu);   // ORN, Rn=PC
+    check(emit(r1, InvalidReg, 0xff, OpMov, LeaveCC) == 0x01fff04fu);   // ORR, Rn=PC
+    check(emit(InvalidReg, r2, 0xff, OpCmp, SetCC)   == 0x0ffff1b2u);   // SUB, S, Rd=PC
+    // Predicate boundary constants (mov r0,#K). Independently oracle-verified encodings.
+    check(emit(r0, InvalidReg, 0x100,      OpMov, LeaveCC) == 0x7080f44fu);  // rotation, control 0xf80
+    check(emit(r0, InvalidReg, 0x00ff00ffu, OpMov, LeaveCC) == 0x10fff04fu); // pattern 01, control 0x1ff
+    check(emit(r0, InvalidReg, 0xff00ff00u, OpMov, LeaveCC) == 0x20fff04fu); // pattern 10, control 0x2ff
+    check(emit(r0, InvalidReg, 0xffffffffu, OpMov, LeaveCC) == 0x30fff04fu); // pattern 11, control 0x3ff
+    check(emit(r0, InvalidReg, 0x1fe,      OpMov, LeaveCC) == 0x70fff44fu);  // rotation, control 0xfff
+    // Non-encodable -> predicate -1 -> as_alu emits a coded UDF (top-16 0xaXXX, hw0 0xf7fX), not an ALU.
+    {
+        uint32_t w = emit(r0, InvalidReg, 0x12345678u, OpMov, LeaveCC);
+        check(((w & 0xfff0u) == 0xf7f0u) && (((w >> 16) & 0xf000u) == 0xa000u));
+    }
+    // Conditional ALU -> B<!c>.W branch-over + unconditional body.
+    {
+        int oc = masm.nextOffset().getOffset();
+        masm.as_alu(r0, r0, Imm8(0x100), OpAdd, LeaveCC, Assembler::Equal);
+        check(masm.varanPeekWord(oc)     == 0x8002f040u);  // bne.w +4 (invert of eq)
+        check(masm.varanPeekWord(oc + 4) == 0x7080f500u);  // add.w r0,r0,#0x100
+    }
+    // wasmPatchBoundsCheck (the P2-missed ALU-imm imm-field read-back+rewrite): read r_index out of a
+    // T2 cmp.w r3,#0 placeholder and rewrite the imm8 to #0x100 in place.
+    {
+        uint32_t slot = 0x0f00f1b3u;   // cmp.w r3,#0 (SUB, S, Rd=PC, Rn=r3)
+        masm.wasmPatchBoundsCheck(reinterpret_cast<uint8_t*>(&slot), 0x100);
+        check(slot == 0x7f80f5b3u);    // cmp.w r3,#0x100 (control 0xf80 -> i=1,imm3=7,imm8=0x80)
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2Wasm1Slot(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN W1 -- bind(RepatchLabel*) must not assume a 2-slot pair.
+    //
+    // ⚠ THE TEST DESIGN IS THE POINT. The bug is that binding a RepatchLabel over a 1-SLOT
+    // unconditional branch wrote NOP.W over slot0+4. When that branch is the LAST instruction in
+    // the buffer you get a loud assert (slot0+4 is past the end) -- that is the lucky case, and it
+    // is what the failing tests happened to hit. When it is NOT last, the write lands on THE
+    // FOLLOWING REAL INSTRUCTION and is completely silent.
+    //
+    // So this test deliberately puts a MARKER INSTRUCTION AFTER the branch and asserts the marker
+    // SURVIVES. A test with the branch at the end would pass against the broken code -- vacuous on
+    // the exact defect, the same trap as writing an oracle around `return x++` (which returns the
+    // OLD value and is correct even when the increment is broken).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+
+    // The marker word, derived by emitting it rather than hard-coded: this test is about the
+    // follower SURVIVING, not about movw's encoding (varanT2CondForms already covers that), and a
+    // hard-coded constant would rot the moment the encoder changed.
+    uint32_t MARKER;
+    {
+        MacroAssembler m;
+        int o = m.nextOffset().getOffset();
+        m.as_movw(r7, Imm16(0xbeef));
+        MARKER = m.varanPeekWord(o);
+    }
+
+    // ---- case 1: the 1-slot Always site (the wasm trap-jump shape) with a FOLLOWER ----
+    {
+        MacroAssembler masm;
+        Label l;
+        BufferOffset br = masm.as_b(&l, Assembler::Always);   // 1 slot: Always takes the 1-slot path
+        int o = br.getOffset();
+        masm.as_movw(r7, Imm16(0xbeef));                      // <-- the follower that must survive
+        // Exactly what MacroAssembler::wasmEmitTrapOutOfLineCode does: synthesize a RepatchLabel
+        // over a site it did not create, then bind it here.
+        l.reset();                                            // bindLater() does this too
+        RepatchLabel jump;
+        jump.use(o);
+        masm.bind(&jump);
+
+        check(masm.varanPeekWord(o + 4) == MARKER);           // THE assertion this test exists for
+        // and slot0 must have become a real branch to the bind point (not left as a placeholder)
+        check(masm.varanPeekWord(o) != MARKER);
+    }
+
+    // ---- case 2: the 2-slot conditional site must STILL be patched as a pair ----
+    // Non-vacuity in the other direction: a fix that simply stopped writing slot1 for everything
+    // would break every jumpWithPatch/backedgeJump site, and this case would catch that.
+    {
+        MacroAssembler masm;
+        RepatchLabel rl;
+        CodeOffsetJump coj = masm.jumpWithPatch(&rl, Assembler::NotEqual);
+        int o = coj.offset();
+        masm.as_movw(r7, Imm16(0xbeef));                      // follower, must ALSO survive
+        masm.bind(&rl);
+        // slot0 and slot1 belong to the reservation; the follower is at o+8.
+        check(masm.varanPeekWord(o + 8) == MARKER);
+    }
+
+    args.rval().setInt32(fails);
+    return true;
+}
+
+static bool
+VaranT2CondForms(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN -- the conditional-forms conversion (sxtb/sxth/uxtb/uxth, movw/movt, multiply,
+    // extdtr) plus the RSC synth. Proves the CONDITION SENSE by EXECUTION, in both directions.
+    //
+    // Why execution and why both directions: the conversion turns `<op><c>` into
+    // `B<!c>.W over <op>`, so the condition is INVERTED at emit time. An inverted-sense bug
+    // produces code that runs, never crashes, and is wrong exactly half the time -- the single
+    // most likely defect in this batch. A test that only checks "the op ran when c held" would
+    // pass with the sense backwards on the other half, so every case is run TWICE.
+    //
+    // The program is emitted through the REAL encoders (not hand-laid bytes) and then copied out
+    // word by word and executed, so what is proven is what the assembler actually emits.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    Simulator* sim = cx->runtime()->simulator();
+
+    uint16_t prog[64];
+    uint16_t mem[2] = { 0xbeef, 0 };   // for the conditional extdtr load
+
+    // Emit `body` into a fresh MacroAssembler wrapped in:
+    //     cmp r0,#0 ; mov r3,#0x11 ; <body> ; mov r0,r3 ; bx lr
+    // r0 = the flag input (0 -> Equal holds), r1 = a value operand, r2 = a pointer operand,
+    // r3 = the result. 0x11 is the untouched-seed sentinel.
+    auto run = [&](void (*body)(MacroAssembler&), int32_t flagIn, int32_t v1, int32_t v2) -> int32_t {
+        MacroAssembler masm;
+        masm.as_cmp(r0, Imm8(0));
+        masm.as_mov(r3, Imm8(0x11));
+        body(masm);
+        masm.as_mov(r0, O2Reg(r3));
+        int nb = masm.nextOffset().getOffset();
+        MOZ_RELEASE_ASSERT(nb > 0 && (nb % 4) == 0 && size_t(nb) + 2 <= sizeof(prog));
+        for (int o = 0; o < nb; o += 4) {
+            uint32_t w = masm.varanPeekWord(o);
+            prog[o / 2] = uint16_t(w & 0xffff);
+            prog[o / 2 + 1] = uint16_t(w >> 16);
+        }
+        prog[nb / 2] = 0x4770;   // bx lr (the one 16-bit word, appended by hand)
+        uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        return int32_t(sim->call(entry, 3, flagIn, v1, v2));
+    };
+
+    const int32_t SEED = 0x11;
+    int32_t ptr = int32_t(uintptr_t(&mem[0]));
+
+    // uxtb<eq>: zero-extend byte.  0x12345678 -> 0x78
+    auto uxtb = [](MacroAssembler& m) { m.as_uxtb(r3, r1, 0, Assembler::Equal); };
+    check(run(uxtb, 0, 0x12345678, 0) == 0x78);     // condition HOLDS -> executed
+    check(run(uxtb, 1, 0x12345678, 0) == SEED);     // condition FAILS  -> skipped
+
+    // sxth<eq>: sign-extend halfword. 0x0000fffe -> -2
+    auto sxth = [](MacroAssembler& m) { m.as_sxth(r3, r1, 0, Assembler::Equal); };
+    check(run(sxth, 0, 0x0000fffe, 0) == -2);
+    check(run(sxth, 1, 0x0000fffe, 0) == SEED);
+
+    // movw<eq>
+    auto movw = [](MacroAssembler& m) { m.as_movw(r3, Imm16(0x1234), Assembler::Equal); };
+    check(run(movw, 0, 0, 0) == 0x1234);
+    check(run(movw, 1, 0, 0) == SEED);
+
+    // movt<eq>: leaves the low half (the 0x11 seed) intact.
+    auto movt = [](MacroAssembler& m) { m.as_movt(r3, Imm16(0xabcd), Assembler::Equal); };
+    check(run(movt, 0, 0, 0) == int32_t(0xabcd0011u));
+    check(run(movt, 1, 0, 0) == SEED);
+
+    // mul<eq>
+    auto mul = [](MacroAssembler& m) { m.as_mul(r3, r1, r1, LeaveCC, Assembler::Equal); };
+    check(run(mul, 0, 7, 0) == 49);
+    check(run(mul, 1, 7, 0) == SEED);
+
+    // ldrh<eq> [r2] -- the conditional extdtr arm, whose body is NOT one instruction.
+    auto ldrh = [](MacroAssembler& m) {
+        m.as_extdtr(IsLoad, 16, false, Offset, r3, EDtrAddr(r2, EDtrOffImm(0)), Assembler::Equal);
+    };
+    check(run(ldrh, 0, 0, ptr) == 0xbeef);
+    check(run(ldrh, 1, 0, ptr) == SEED);
+
+    // ---- RSC synth (unconditional, but carry-sensitive) ----
+    // MacroAssembler::neg64 is `rsbs lo,lo,#0 ; rsc hi,hi,#0`; the whole point of RSC is that it
+    // consumes the borrow out of the RSB. A synth that dropped the carry would still produce the
+    // right answer for the lo==0 case, so both cases are checked.
+    //     value 1        (hi=0, lo=1) -> -(1)        high word = 0xffffffff
+    //     value 2<<32    (hi=2, lo=0) -> -(2<<32)    high word = 0xfffffffe
+    auto neg64hi = [](MacroAssembler& m) {
+        m.as_rsb(r1, r1, Imm8(0), SetCC);      // lo = 0 - lo, sets the borrow in C
+        m.as_rsc(r2, r2, Imm8(0));             // hi = 0 - hi - NOT(C)
+        m.as_mov(r3, O2Reg(r2));
+    };
+    check(uint32_t(run(neg64hi, 0, 1, 0)) == 0xffffffffu);   // lo=1 borrows -> C=0
+    check(uint32_t(run(neg64hi, 0, 0, 2)) == 0xfffffffeu);   // lo=0 no borrow -> C=1
+
+    args.rval().setInt32(fails);
+    return true;
+}
+
+static bool
+VaranT2AluImmExec(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 1 -- ALU-immediate SIM EXECUTE (proves the VALUE, not just the bytes). Runs hand-laid
+    // modimm programs through the simulator's new modified-immediate decoder. Returns failed-check count.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    Simulator* sim = cx->runtime()->simulator();
+    uint16_t prog[16];
+    int nb = 0;
+    auto reset = [&]() { nb = 0; };
+    auto put32 = [&](uint32_t w) { prog[nb / 2] = uint16_t(w & 0xffff); prog[nb / 2 + 1] = uint16_t(w >> 16); nb += 4; };
+    auto put16 = [&](uint16_t w) { prog[nb / 2] = w; nb += 2; };
+    auto entry = [&]() { return reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1); };
+
+    // (1) and.w r0,r0,#0xf0 ; add.w r0,r0,#0x100 ; bx lr   -- r0=200 -> (200&0xf0)+0x100 = 0xc0+0x100 = 448.
+    reset();
+    put32(0x00f0f000u);   // and.w r0,r0,#0xf0
+    put32(0x7080f500u);   // add.w r0,r0,#0x100
+    put16(0x4770u);       // bx lr
+    check(int32_t(sim->call(entry(), 1, 200)) == 448);
+
+    // (2) conditional branch-over: subs.w r0,r0,r1 ; bne.w +4 ; add.w r0,r0,#0x100 ; bx lr
+    //     r0==r1 -> subs=0 (Z) -> eq true -> add executes -> 0x100 ; r0!=r1 -> Z clear -> add skipped.
+    reset();
+    put32(0x0001ebb0u);   // subs.w r0,r0,r1
+    put32(0x8002f040u);   // bne.w +4  (the seam's branch-over)
+    put32(0x7080f500u);   // add.w r0,r0,#0x100
+    put16(0x4770u);       // bx lr
+    check(int32_t(sim->call(entry(), 2, 5, 5)) == 0x100);   // taken (eq): 0 + 0x100
+    check(int32_t(sim->call(entry(), 2, 7, 5)) == 2);       // not taken (ne): 7-5, add skipped
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2Vfp(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 2 -- VFP BYTE-MATCH. The T2 VFP word == the A32 word (cond AL) halfword-swapped.
+    // Checks the near-copy for arith (vadd/vmul/vdiv), the as_vnmul SOURCE fix (bit6, distinct from
+    // vmul), vmrs, the conditional -> B<!c>.W branch-over, and that VLDR/VSTR + block-transfer defer
+    // to a coded UDF. Returns failed-check count (0 = pass).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto emit = [&](void) -> uint32_t { return masm.varanPeekWord(masm.nextOffset().getOffset() - 4); };
+    // Arithmetic (d0 = vd, d1 = vn, d2 = vm). A32 words -> halfword-swapped T2.
+    masm.as_vadd(d0, d1, d2);  check(emit() == 0x0b02ee31u);   // A32 EE310B02
+    masm.as_vmul(d0, d1, d2);  check(emit() == 0x0b02ee21u);   // A32 EE210B02
+    masm.as_vdiv(d0, d1, d2);  check(emit() == 0x0b02ee81u);   // A32 EE810B02
+    masm.as_vnmul(d0, d1, d2); check(emit() == 0x0b42ee21u);   // A32 EE210B42 (bit6 -- the FIX, != vmul)
+    masm.as_vmrs(r0);          check(emit() == 0x0a10eef1u);   // A32 EEF10A10
+    // Conditional vadd (Equal) -> bne.w +4 branch-over + vadd.f64 (AL).
+    {
+        int oc = masm.nextOffset().getOffset();
+        masm.as_vadd(d0, d1, d2, Assembler::Equal);
+        check(masm.varanPeekWord(oc)     == 0x8002f040u);      // bne.w +4
+        check(masm.varanPeekWord(oc + 4) == 0x0b02ee31u);      // vadd.f64 d0,d1,d2 (AL)
+    }
+    // (VFP block-transfer vpush/vpop is covered by VaranT2BlockXferExec's round-trip -- Batch 3.)
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2VfpExec(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 2 -- VFP SIM EXECUTE (proves the VALUE). Builds a real VFP computation via the
+    // converted encoders, runs it through the simulator (which un-swaps the T2 word and delegates to
+    // the base A32 VFP decoder), and checks the integer result. Returns failed-check count.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    Simulator* sim = cx->runtime()->simulator();
+
+    auto build_and_run = [&](double a, double b, bool mul) -> int32_t {
+        js::LifoAlloc lifo(1 << 16);
+        TempAllocator alloc(&lifo);
+        JitContext jc(cx, &alloc);
+        MacroAssembler masm;
+        masm.loadConstantDouble(a, d0);
+        masm.loadConstantDouble(b, d1);
+        if (mul) masm.as_vmul(d2, d0, d1);
+        else     masm.as_vadd(d2, d0, d1);
+        masm.as_vcvt(VFPRegister(d2).sintOverlay(), VFPRegister(d2));           // d2.s = (int32)d2
+        masm.as_vxfer(r0, InvalidReg, VFPRegister(d2).sintOverlay(), Assembler::FloatToCore); // r0 = int
+        if (masm.oom()) return INT32_MIN;
+        uint16_t prog[128];
+        int nb = 0;
+        int total = masm.nextOffset().getOffset();
+        for (int off = 0; off < total; off += 4) {
+            uint32_t w = masm.varanPeekWord(off);
+            prog[nb / 2] = uint16_t(w & 0xffff); prog[nb / 2 + 1] = uint16_t(w >> 16); nb += 4;
+        }
+        prog[nb / 2] = 0x4770;   // bx lr
+        uint8_t* entry = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        return int32_t(sim->call(entry, 1, 0));   // sim requires >=1 arg; the program ignores it
+    };
+
+    check(build_and_run(2.0, 3.0, true)  == 6);   // 2.0 * 3.0 = 6.0 -> 6
+    check(build_and_run(2.0, 3.0, false) == 5);   // 2.0 + 3.0 = 5.0 -> 5
+    check(build_and_run(4.0, 10.0, false) == 14); // 4.0 + 10.0 = 14.0 -> 14
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2DataProc(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 2 -- data-proc BULK byte-match (mul/mla/mls/umull/smull/clz/sxtb/uxtb/sxth/uxth),
+    // each oracle byte-matched. (sdiv/udiv are HasIDIV-gated -> dead on Cortex-A9, not converted.)
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto emit = [&](void) -> uint32_t { return masm.varanPeekWord(masm.nextOffset().getOffset() - 4); };
+    masm.as_mul(r1, r2, r3);        check(emit() == 0xf103fb02u);
+    masm.as_mla(r1, r4, r2, r3);    check(emit() == 0x4103fb02u);   // as_mla(dest,acc,src1,src2)
+    masm.as_mls(r1, r4, r2, r3);    check(emit() == 0x4113fb02u);
+    masm.as_umull(r1, r0, r2, r3);  check(emit() == 0x0103fba2u);   // as_umull(destHI,destLO,src1,src2)
+    masm.as_smull(r1, r0, r2, r3);  check(emit() == 0x0103fb82u);
+    masm.as_clz(r1, r3);            check(emit() == 0xf183fab3u);
+    masm.as_sxtb(r1, r3, 0);        check(emit() == 0xf183fa4fu);
+    masm.as_uxtb(r1, r3, 0);        check(emit() == 0xf183fa5fu);
+    masm.as_sxth(r1, r3, 0);        check(emit() == 0xf183fa0fu);
+    masm.as_uxth(r1, r3, 0);        check(emit() == 0xf183fa1fu);
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2DataProcExec(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 2 -- data-proc SIM EXECUTE (proves the VALUE).
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    Simulator* sim = cx->runtime()->simulator();
+    uint16_t prog[16];
+    int nb = 0;
+    auto reset = [&]() { nb = 0; };
+    auto put32 = [&](uint32_t w) { prog[nb / 2] = uint16_t(w & 0xffff); prog[nb / 2 + 1] = uint16_t(w >> 16); nb += 4; };
+    auto put16 = [&](uint16_t w) { prog[nb / 2] = w; nb += 2; };
+    auto entry = [&]() { return reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1); };
+
+    reset(); put32(0xf001fb00u); put16(0x4770u); check(int32_t(sim->call(entry(), 2, 6, 7)) == 42);          // mul r0,r0,r1
+    reset(); put32(0xf080fab0u); put16(0x4770u); check(int32_t(sim->call(entry(), 1, 0x8000)) == 16);        // clz r0,r0
+    reset(); put32(0xf080fa4fu); put16(0x4770u); check(int32_t(sim->call(entry(), 1, 0xff)) == -1);          // sxtb r0,r0
+    reset(); put32(0xf080fa1fu); put16(0x4770u); check(int32_t(sim->call(entry(), 1, 0x12345678)) == 0x5678); // uxth r0,r0
+
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2BlockXfer(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 3 -- block-transfer BYTE-MATCH: integer LDM/STM (IA/DB), push/pop, and DA -> UDF.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    js::LifoAlloc lifo(1 << 16);
+    TempAllocator alloc(&lifo);
+    JitContext jc(cx, &alloc);
+    MacroAssembler masm;
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    auto emit = [&](void) -> uint32_t { return masm.varanPeekWord(masm.nextOffset().getOffset() - 4); };
+    masm.as_dtm(IsLoad,  r0, 0xe, IA, NoWriteBack, Assembler::Always); check(emit() == 0x000ee890u); // ldmia r0,{r1,r2,r3}
+    masm.as_dtm(IsLoad,  r0, 0xe, IA, WriteBack,   Assembler::Always); check(emit() == 0x000ee8b0u); // ldmia r0!
+    masm.as_dtm(IsStore, r0, 0xe, IA, WriteBack,   Assembler::Always); check(emit() == 0x000ee8a0u); // stmia r0!
+    masm.as_dtm(IsStore, sp, 0xe, DB, WriteBack,   Assembler::Always); check(emit() == 0x000ee92du); // push {r1,r2,r3}
+    masm.as_dtm(IsLoad,  sp, 0xe, IA, WriteBack,   Assembler::Always); check(emit() == 0x000ee8bdu); // pop {r1,r2,r3}
+    // DA has no T2 form, so Batch B item 3 SYNTHESISES it as per-register ldr/str, lowest register
+    // to lowest address. (This line previously asserted a UDF 0x28b; that premise died with the
+    // synth -- the same stale-self-test trap varanT2PoolDefer fell into after Batch 4.)
+    // {r1,r2,r3} DA from r0, n=3 -> lowest address = r0-8: r1<-[r0,#-8], r2<-[r0,#-4], r3<-[r0].
+    // NB emit() re-reads the LAST word, so a multi-instruction expansion must be read by OFFSET.
+    {
+        int o = masm.nextOffset().getOffset();
+        masm.as_dtm(IsLoad,  r0, 0xe, DA, NoWriteBack, Assembler::Always);
+        check(masm.nextOffset().getOffset() - o == 12);      // exactly 3 loads, no UDF
+        check(masm.varanPeekWord(o)     == 0x1c08f850u);     // ldr r1,[r0,#-8]   50 f8 08 1c
+        check(masm.varanPeekWord(o + 4) == 0x2c04f850u);     // ldr r2,[r0,#-4]   50 f8 04 2c
+        check(masm.varanPeekWord(o + 8) == 0x3000f8d0u);     // ldr.w r3,[r0]     d0 f8 00 30
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+static bool
+VaranT2BlockXferExec(JSContext* cx, unsigned argc, Value* vp)
+{
+    // VARAN Batch 3 -- block-transfer SIM EXECUTE: an integer push/pop round-trip and a VFP vpush/vpop
+    // round-trip. Returns failed-check count.
+    using namespace js::jit;
+    CallArgs args = CallArgsFromVp(argc, vp);
+    int fails = 0;
+    auto check = [&](bool ok) { if (!ok) fails++; };
+    Simulator* sim = cx->runtime()->simulator();
+
+    // Integer: push {r1,r2} ; pop {r0,r1} ; bx lr  -> r0 = original r1.
+    {
+        uint16_t prog[8];
+        prog[0] = 0xe92du; prog[1] = 0x0006u;   // stmdb sp!,{r1,r2}
+        prog[2] = 0xe8bdu; prog[3] = 0x0003u;   // ldmia sp!,{r0,r1}
+        prog[4] = 0x4770u;                      // bx lr
+        uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+        check(uint32_t(sim->call(e, 2, 0, 0x12345678)) == 0x12345678u);
+    }
+    // VFP: d0 = double(r0:r1) ; vpush{d0} ; vpop{d1} ; r0:r1 = d1 -> r0 round-trips.
+    {
+        js::LifoAlloc lifo(1 << 16);
+        TempAllocator alloc(&lifo);
+        JitContext jc(cx, &alloc);
+        MacroAssembler masm;
+        masm.as_vxfer(r0, r1, d0, Assembler::CoreToFloat);                       // vmov d0, r0, r1
+        masm.startFloatTransferM(IsStore, sp, DB, WriteBack);
+        masm.transferFloatReg(d0); masm.finishFloatTransfer();                   // vpush {d0}
+        masm.startFloatTransferM(IsLoad, sp, IA, WriteBack);
+        masm.transferFloatReg(d1); masm.finishFloatTransfer();                   // vpop {d1}
+        masm.as_vxfer(r0, r1, d1, Assembler::FloatToCore);                       // vmov r0, r1, d1
+        if (masm.oom()) { check(false); }
+        else {
+            uint16_t prog[64];
+            int nb = 0, total = masm.nextOffset().getOffset();
+            for (int off = 0; off < total; off += 4) {
+                uint32_t w = masm.varanPeekWord(off);
+                prog[nb / 2] = uint16_t(w & 0xffff); prog[nb / 2 + 1] = uint16_t(w >> 16); nb += 4;
+            }
+            prog[nb / 2] = 0x4770u;
+            uint8_t* e = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(prog) | 1);
+            check(uint32_t(sim->call(e, 2, 0xaabbccddu, 0x11223344u)) == 0xaabbccddu);
+        }
+    }
+    args.rval().setInt32(fails);
+    return true;
+}
+#endif
+
 static const JSFunctionSpecWithHelp TestingFunctions[] = {
+#if defined(JS_SIMULATOR_ARM) && defined(VARAN_THUMB2)
+    JS_FN_HELP("varanT2Hello", VaranT2Hello, 2, 0,
+"varanT2Hello(a, b)",
+"  VARAN P1.1: run the Thumb-2 hello-world (adds.w r0,r0,r1 ; bx lr) through the ARM simulator; returns a+b."),
+    JS_FN_HELP("varanT2Udf", VaranT2Udf, 0, 0,
+"varanT2Udf()",
+"  VARAN P1.1: run a wide UDF through the simulator; prints the UDF diagnostic and crashes (fail-loud gate)."),
+    JS_FN_HELP("varanT2MovwT", VaranT2MovwT, 0, 0,
+"varanT2MovwT()",
+"  VARAN P1.2b: run movw/movt through the simulator; returns 0x56781234 if the T3 decode is correct."),
+    JS_FN_HELP("varanT2Branch", VaranT2Branch, 0, 0,
+"varanT2Branch()",
+"  VARAN P1.2b Group 2: run a control-flow gauntlet (fwd/back/cond-taken/cond-not-taken) through the\n"
+"  simulator; returns 105 iff every branch lands correctly."),
+    JS_FN_HELP("varanT2BranchBind", VaranT2BranchBind, 0, 0,
+"varanT2BranchBind()",
+"  VARAN P1.2b Group 2: drive a real MacroAssembler through as_b/bind (forward chains, backward,\n"
+"  in-range 2-slot, and the >1MB invert+B.W fallback); returns the number of failed checks (0 = pass)."),
+    JS_FN_HELP("varanT2RetargetSplice", VaranT2RetargetSplice, 0, 0,
+"varanT2RetargetSplice()",
+"  VARAN P1.2b Group 2 hygiene: retarget() splices a 2-slot conditional chain onto another label;\n"
+"  returns the number of failed checks (0 = pass; nonzero before the slot1 chain-link fix)."),
+    JS_FN_HELP("varanT2Wasm1Slot", VaranT2Wasm1Slot, 0, 0,
+"varanT2Wasm1Slot()",
+"  VARAN W1: bind(RepatchLabel*) must patch ONLY slot0 for a 1-slot unconditional site, and still\n"
+"  patch the pair for a 2-slot reserved site. Asserts the FOLLOWING instruction survives. 0 = pass."),
+
+    JS_FN_HELP("varanT2CondForms", VaranT2CondForms, 0, 0,
+"varanT2CondForms()",
+"  VARAN: the conditional-forms conversion (sxt/uxt, movw/movt, multiply, extdtr) and the RSC synth,\n"
+"  proven by EXECUTION in both directions (condition holds / condition fails). 0 = pass."),
+
+    JS_FN_HELP("varanT2AluImm", VaranT2AluImm, 1, 0,
+"varanT2AluImm(go)",
+"  VARAN Batch 1: ALU-immediate byte-match (opcode table + modimm predicate + UDF fallback +\n"
+"  conditional branch-over); returns failed-check count (0 = every emitted word matches the oracle)."),
+    JS_FN_HELP("varanT2AluImmExec", VaranT2AluImmExec, 0, 0,
+"varanT2AluImmExec()",
+"  VARAN Batch 1: run modified-immediate + conditional ALU through the simulator; returns failed-check\n"
+"  count (0 = the computed VALUES are correct)."),
+    JS_FN_HELP("varanT2Vfp", VaranT2Vfp, 0, 0,
+"varanT2Vfp()",
+"  VARAN Batch 2: VFP byte-match (arith near-copy + as_vnmul bit6 fix + vmrs + conditional branch-over\n"
+"  + block-transfer defer); returns failed-check count (0 = every word matches the oracle)."),
+    JS_FN_HELP("varanT2VfpExec", VaranT2VfpExec, 0, 0,
+"varanT2VfpExec()",
+"  VARAN Batch 2: run VFP arithmetic through the simulator (2*3=6, 2+3=5, 4+10=14); returns failed-check\n"
+"  count (0 = the computed VALUES are correct)."),
+    JS_FN_HELP("varanT2DataProc", VaranT2DataProc, 0, 0,
+"varanT2DataProc()",
+"  VARAN Batch 2: data-proc bulk byte-match (mul/mla/mls/umull/smull/clz/extends); 0 = all match oracle."),
+    JS_FN_HELP("varanT2DataProcExec", VaranT2DataProcExec, 0, 0,
+"varanT2DataProcExec()",
+"  VARAN Batch 2: run mul/clz/sxtb/uxth through the simulator; 0 = the computed VALUES are correct."),
+    JS_FN_HELP("varanT2BlockXfer", VaranT2BlockXfer, 0, 0,
+"varanT2BlockXfer()",
+"  VARAN Batch 3: block-transfer byte-match (integer LDM/STM IA/DB, push/pop, DA->UDF); 0 = pass."),
+    JS_FN_HELP("varanT2BlockXferExec", VaranT2BlockXferExec, 0, 0,
+"varanT2BlockXferExec()",
+"  VARAN Batch 3: integer push/pop + VFP vpush/vpop round-trip through the simulator; 0 = values correct."),
+    JS_FN_HELP("varanT2LoadStore", VaranT2LoadStore, 0, 0,
+"varanT2LoadStore()",
+"  VARAN Batch 4: LDR/STR/LDRB/STRB byte-match (T3/T4) + a store/load round-trip through the simulator; 0 = pass."),
+    JS_FN_HELP("varanT2ExtDtr", VaranT2ExtDtr, 0, 0,
+"varanT2ExtDtr()",
+"  VARAN Batch 4: LDRH/STRH/LDRSB/LDRSH + LDRD/STRD byte-match + strd/ldrd + signed-halfword round-trip; 0 = pass."),
+    JS_FN_HELP("varanT2Vldr", VaranT2Vldr, 0, 0,
+"varanT2Vldr()",
+"  VARAN Batch 4: VLDR/VSTR byte-match + an 8-byte double vldr/vstr round-trip through the simulator; 0 = pass."),
+    JS_FN_HELP("varanT2Pool", VaranT2Pool, 0, 0,
+"varanT2Pool()",
+"  VARAN Batch 4: constant pool -- PoolHintData index round-trip + a double-via-pool finishPool reach check (-4 bias); 0 = pass."),
+    JS_FN_HELP("varanT2JumpPatch", VaranT2JumpPatch, 0, 0,
+"varanT2JumpPatch()",
+"  VARAN Batch 4: 2-slot patchable jump -- VaranComputeJump2 (incl >+-1MB fallback) + jumpWithPatch/bind(RepatchLabel*); 0 = pass."),
+    JS_FN_HELP("varanT2RegBranch", VaranT2RegBranch, 0, 0,
+"varanT2RegBranch()",
+"  VARAN Batch 4: bx/blx/bkpt/NOP.W byte-match + the blx HIGH-halfword LR-packing execution proof; 0 = pass."),
+    JS_FN_HELP("varanT2Toggle", VaranT2Toggle, 0, 0,
+"varanT2Toggle()",
+"  VARAN Batch 4: ToggleCall/ToggledCallSize disabled<->enabled round-trip over movw/movt + NOP.W/BLXReg; 0 = pass."),
+    JS_FN_HELP("varanT2PoolDefer", VaranT2PoolDefer, 0, 0,
+"varanT2PoolDefer()",
+"  VARAN P1: the A32 pool escape is closed -- the float64/float32-constant and jumpWithPatch paths are\n"
+"  live Thumb-2, and ma_b(void*) is now movw/movt+bx; returns failed-check count (0 = pass)."),
+    JS_FN_HELP("varanT2ToggleJump", VaranT2ToggleJump, 0, 0,
+"varanT2ToggleJump()",
+"  VARAN Batch A: the 2-slot toggled-jump redesign (ToggleToJmp/ToggleToCmp). EXECUTES the site under\n"
+"  the simulator across enabled->disabled->enabled, proving control flows both ways; 0 = pass."),
+    JS_FN_HELP("varanT2MrsMsr", VaranT2MrsMsr, 0, 0,
+"varanT2MrsMsr()",
+"  VARAN Batch B: MRS/MSR (census 0x210/0x212) -- the one NEW 32-bit decode case, collision-audited.\n"
+"  Byte-match + a flags save/clobber/restore round-trip executed under the simulator; 0 = pass."),
+    JS_FN_HELP("varanT2CondDtrDtm", VaranT2CondDtrDtm, 0, 0,
+"varanT2CondDtrDtm()",
+"  VARAN Batch B: conditional ldr/str branch-over with a PATCHED skip (census 0x24e) and the as_dtm\n"
+"  DA/IB per-register synth (0x28b), incl. as_alu's now-variable conditional body; 0 = pass."),
+    JS_FN_HELP("varanT2ShiftReg", VaranT2ShiftReg, 0, 0,
+"varanT2ShiftReg()",
+"  VARAN Batch B: register-CONTROLLED shift (census 0x11d). Oracle byte-match of the dedicated\n"
+"  LSL/LSR/ASR/ROR (register) synth + the shift-into-ip path, and EXECUTE incl. >=32 amounts; 0 = pass."),
+    JS_FN_HELP("varanT2C7Bit", VaranT2C7Bit, 0, 0,
+"varanT2C7Bit()",
+"  VARAN Batch F: C7 -- the Thumb bit on SYNTHESIZED code addresses (rectifier returnAddrOut, both\n"
+"  DebugModeOSR handler arms). Non-vacuous: asserts odd AND != the pre-C7 even form; 0 = pass."),
+    JS_FN_HELP("varanT2EmitGuards", VaranT2EmitGuards, 1, 0,
+"varanT2EmitGuards(go)",
+"  VARAN Batch E: the emit-contract guards (no PC in a wide data-proc register field; no str/sub-word\n"
+"  ldr with Rt=15; no register-offset load with Rn=15). Non-vacuous BOTH ways -- also asserts the six\n"
+"  legal special forms and the live `ldr pc,[sp],#4` stay SILENT; 0 = pass."),
+    JS_FN_HELP("varanT2AdrOsr", VaranT2AdrOsr, 0, 0,
+"varanT2AdrOsr()",
+"  VARAN Batch C: ADR (T3) and the OSR return-address shape. Discriminating -- the A32 pc+8\n"
+"  arithmetic lands on a different, checkable word rather than crashing; 0 = pass."),
+    JS_FN_HELP("varanT2PcLiteral", VaranT2PcLiteral, 0, 0,
+"varanT2PcLiteral()",
+"  VARAN Batch A: the simulator's Thumb-2 PC-read base, Align(insn+4,4) rather than the A32 insn+8.\n"
+"  Discriminating pc-relative literal load (a regression loads 0xDEADBEEF, not a crash); 0 = pass."),
+#endif
     JS_FN_HELP("gc", ::GC, 0, 0,
 "gc([obj] | 'zone' [, 'shrinking'])",
 "  Run the garbage collector. When obj is given, GC only its zone.\n"

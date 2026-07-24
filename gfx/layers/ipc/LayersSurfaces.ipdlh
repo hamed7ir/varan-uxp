@@ -30,6 +30,12 @@ struct OverlaySource {
   IntSize size;
 };
 
+// Varan (M5 Lever D): restore D3D9 surface descriptor (revert Issue #1841 Part 3)
+struct SurfaceDescriptorD3D9 {
+  // IDirect3DTexture9*
+  uintptr_t texture;
+};
+
 struct SurfaceDescriptorFileMapping {
   WindowsHandle handle;
   SurfaceFormat format;
@@ -123,6 +129,7 @@ union SurfaceDescriptor {
   SurfaceDescriptorBuffer;
   SurfaceDescriptorDIB;
   SurfaceDescriptorD3D10;
+  SurfaceDescriptorD3D9; // Varan (M5 Lever D): revert Issue #1841 Part 3
   SurfaceDescriptorFileMapping;
   SurfaceDescriptorDXGIYCbCr;
   SurfaceDescriptorX11;

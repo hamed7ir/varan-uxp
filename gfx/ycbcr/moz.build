@@ -51,7 +51,14 @@ else:
         'yuv_row_other.cpp',
     ]
 
-if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['HAVE_ARM_NEON']:
+# Varan (M4.1b Task 5b / survey-1 A3): gate the A32 NEON block on GNU_CC,
+# mirroring the pixman sibling (gfx/cairo/libpixman/src/moz.build). yuv_row_arm.s is pure
+# A32 (.fpu neon, no .thumb, ADDLT/SUBLT outside an IT block) -> device-lethal on Win RT
+# (CPSR.T dropped across preemption) AND clang-cl's integrated assembler rejects the GNU/A32
+# directives. Under clang-cl GNU_CC='' -> this whole block is skipped -> the software YCbCr
+# path falls to the portable C (yuv_row_other.cpp / yuv_convert C). Latent today
+# (HAVE_ARM_NEON=''); this pre-empts M4.2 flipping NEON on.
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['HAVE_ARM_NEON'] and CONFIG['GNU_CC']:
     SOURCES += [
         'yuv_row_arm.s',
     ]

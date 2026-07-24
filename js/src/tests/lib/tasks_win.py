@@ -22,7 +22,7 @@ class TaskFinishedMarker:
 
 def _do_work(qTasks, qResults, qWatch, prefix, run_skipped, timeout, show_cmd):
     while True:
-        test = qTasks.get(block=True, timeout=sys.maxsize)
+        test = qTasks.get(block=True)  # VARAN: was timeout=sys.maxsize (py2 "block forever" idiom); py3 overflows it (OverflowError: timestamp too large) -> worker thread dies -> harness deadlocks. block=True already waits indefinitely.
         if test is EndMarker:
             qWatch.put(EndMarker)
             qResults.put(EndMarker)
@@ -46,6 +46,10 @@ def _do_work(qTasks, qResults, qWatch, prefix, run_skipped, timeout, show_cmd):
         # buffer clear on the "main" worker thread.
         qWatch.put(proc)
         out, err = proc.communicate()
+        # VARAN: py3 communicate() returns bytes; downstream (jittests.check_output)
+        # does str ops (out.split('\n')). Decode here so the whole harness sees str.
+        out = out.decode('utf-8', 'replace')
+        err = err.decode('utf-8', 'replace')
         qWatch.put(TaskFinishedMarker)
 
         # Create a result record and forward to result processing.
@@ -73,7 +77,7 @@ def _do_watch(qWatch, timeout):
                 # ignore this.
                 if ex.winerror != 5:
                     raise
-            fin = qWatch.get(block=True, timeout=sys.maxsize)
+            fin = qWatch.get(block=True)  # VARAN: was timeout=sys.maxsize (py2 "block forever" idiom); py3 overflows it (OverflowError: timestamp too large) -> worker thread dies -> harness deadlocks. block=True already waits indefinitely.
             assert fin is TaskFinishedMarker, "invalid finish marker"
 
 

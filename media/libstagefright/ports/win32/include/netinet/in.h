@@ -6,7 +6,10 @@
 
 #include <stdint.h>
 
-#if defined(_M_IX86) || defined(_M_AMD64)
+/* Varan: Win-ARM (clang-cl thumbv7 defines _M_ARM) is little-endian
+   like x86/x64 -- the byte-swap bodies below are arch-independent. Extend the gate to
+   ARM/ARM64 so ntohl/ntohs/htonl/htons are declared (was: #error Unsupported arch). */
+#if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_ARM) || defined(_M_ARM64)
 
 static uint32_t
 ntohl(uint32_t x)

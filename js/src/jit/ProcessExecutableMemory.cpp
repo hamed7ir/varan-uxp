@@ -18,6 +18,8 @@
 #include "jswin.h"
 
 #include <errno.h>
+#include <stdio.h>   // Varan M1.1 (Batch 6) debug breadcrumbs
+#include <stdlib.h>  // getenv for the GOANNA_* runtime toggles
 
 #include "gc/Memory.h"
 #include "threading/LockGuard.h"
@@ -53,7 +55,9 @@ ComputeRandomAllocationAddress()
 # ifdef HAVE_64BIT_BUILD
     static const uintptr_t base = 0x0000000080000000;
     static const uintptr_t mask = 0x000003ffffff0000;
-# elif defined(_M_IX86) || defined(__i386__)
+# elif defined(_M_IX86) || defined(__i386__) || defined(_M_ARM) || defined(__arm__)
+    // Varan M1: ARM32 shares x86's 32-bit address space, so reuse the x86 ASLR
+    // base/mask ([64MiB,1GiB), 13 bits of randomness) for the executable pool.
     static const uintptr_t base = 0x04000000;
     static const uintptr_t mask = 0x3fff0000;
 # else
@@ -232,9 +236,33 @@ DeallocateProcessExecutableMemory(void* addr, size_t bytes)
     VirtualFree(addr, 0, MEM_RELEASE);
 }
 
+// Varan M1.1 (Batch 6) debug toggles -- ONE binary, runtime env-gated (no rebuild to switch):
+//   GOANNA_FORCE_RWX=1 : commit/keep JIT pages PAGE_EXECUTE_READWRITE (known-working RWX
+//                        mapping on this device); the W^X flips then leave pages RWX. Tests suspect S2.
+//   GOANNA_JITDBG=1    : breadcrumb every commit/reprotect to stderr (address, size, flags, WIN32 result).
+static bool GoannaForceRWX() {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("GOANNA_FORCE_RWX"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v == 1;
+}
+static bool GoannaJitDbg() {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("GOANNA_JITDBG"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v == 1;
+}
+
 static DWORD
 ProtectionSettingToFlags(ProtectionSetting protection)
 {
+    if (GoannaForceRWX()) {
+        // Writable and Executable both -> RWX so the W^X toggle is a no-op; reserve stays NOACCESS.
+        switch (protection) {
+          case ProtectionSetting::Protected:  return PAGE_NOACCESS;
+          case ProtectionSetting::Writable:   return PAGE_EXECUTE_READWRITE;
+          case ProtectionSetting::Executable: return PAGE_EXECUTE_READWRITE;
+        }
+        MOZ_CRASH();
+    }
     switch (protection) {
       case ProtectionSetting::Protected:  return PAGE_NOACCESS;
       case ProtectionSetting::Writable:   return PAGE_READWRITE;
@@ -246,7 +274,12 @@ ProtectionSettingToFlags(ProtectionSetting protection)
 static void
 CommitPages(void* addr, size_t bytes, ProtectionSetting protection)
 {
-    if (!VirtualAlloc(addr, bytes, MEM_COMMIT, ProtectionSettingToFlags(protection)))
+    DWORD f = ProtectionSettingToFlags(protection);
+    void* r = VirtualAlloc(addr, bytes, MEM_COMMIT, f);
+    if (GoannaJitDbg())
+        fprintf(stderr, "[JITDBG] Commit addr=%p bytes=%u prot=0x%lx -> %s\n",
+                addr, (unsigned)bytes, (unsigned long)f, r ? "OK" : "FAIL");
+    if (!r)
         MOZ_CRASH("CommitPages failed");
 }
 
@@ -671,7 +704,12 @@ js::jit::ReprotectRegion(void* start, size_t size, ProtectionSetting protection)
 #ifdef XP_WIN
     DWORD oldProtect;
     DWORD flags = ProtectionSettingToFlags(protection);
-    if (!VirtualProtect(pageStart, size, flags, &oldProtect))
+    BOOL vpOk = VirtualProtect(pageStart, size, flags, &oldProtect);
+    if (GoannaJitDbg())
+        fprintf(stderr, "[JITDBG] Reprotect page=%p size=%u new=0x%lx old=0x%lx -> %s\n",
+                pageStart, (unsigned)size, (unsigned long)flags, (unsigned long)oldProtect,
+                vpOk ? "OK" : "FAIL");
+    if (!vpOk)
         return false;
 #else
     unsigned flags = ProtectionSettingToFlags(protection);

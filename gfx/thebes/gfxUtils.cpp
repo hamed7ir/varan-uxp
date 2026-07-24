@@ -1111,6 +1111,32 @@ const float kIdentityNarrowYCbCrToRGB_RowMajor[16] = {
     0.00000f, 0.00000f, 0.00000f, 1.00000f, 0.00000f, 0.00000f,
     0.00000f, 0.00000f, 0.00000f, 1.00000f};
 
+// Varan (M5 Lever D): restore the 4x3 row-major limited-range YUV->RGB matrix (removed by Issue
+// #2101). CompositorD3D9::DrawQuad uploads it as 3 float4 pixel-shader constants
+// (SetPixelShaderConstantF(..., 3)); the values/layout must stay exactly as the shader was authored for.
+// ⚠ DO NOT delete this as "redundant" with YuvToRgbMatrix4x4XRowMajor/ColumnMajor below: those fold the
+// colour-range OFFSET into column 4 (non-zero), so they are NOT a drop-in for this offset-free 4x3 matrix.
+// This helper is intentionally D3D9-only; removing it silently breaks D3D9 video colour.
+/* static */ float*
+gfxUtils::Get4x3YuvColorMatrix(YUVColorSpace aYUVColorSpace)
+{
+  static const float yuv_to_rgb_rec601[12] = { 1.16438f,  0.0f,      1.59603f, 0.0f,
+                                               1.16438f, -0.39176f, -0.81297f, 0.0f,
+                                               1.16438f,  2.01723f,  0.0f,     0.0f,
+                                             };
+
+  static const float yuv_to_rgb_rec709[12] = { 1.16438f,  0.0f,      1.79274f, 0.0f,
+                                               1.16438f, -0.21325f, -0.53291f, 0.0f,
+                                               1.16438f,  2.11240f,  0.0f,     0.0f,
+                                             };
+
+  if (aYUVColorSpace == YUVColorSpace::BT709) {
+    return const_cast<float*>(yuv_to_rgb_rec709);
+  } else {
+    return const_cast<float*>(yuv_to_rgb_rec601);
+  }
+}
+
 /* static */ const float*
 gfxUtils::YuvToRgbMatrix4x4XRowMajor(YUVColorSpace aYUVColorSpace, ColorRange aColorRange)
 {

@@ -4301,7 +4301,11 @@ pref("gl.multithreaded", true);
 pref("gl.ignore-dx-interop2-blacklist", false);
 
 pref("webgl.force-enabled", false);
-pref("webgl.disabled", false);
+// Varan (M4.1b): WebGL OFF the runtime path until Phase D (GPU) is
+// device-proven. ANGLE stays BUILT (M5 needs it); this just keeps the first
+// WebGL-probing page from loading it + attempting D3D11 device creation on
+// Tegra 3 / WinRT (un-run on real hardware). Reversible: flip back for Phase D.
+pref("webgl.disabled", true);
 pref("webgl.disable-angle", false);
 pref("webgl.disable-wgl", false);
 pref("webgl.min_capability_mode", false);
@@ -4385,6 +4389,11 @@ pref("layers.acceleration.enabled", true);
 // Whether to force acceleration on, ignoring blacklists.
 // This requires layers.acceleration.enabled to be set to true
 pref("layers.acceleration.force", false);
+// Varan (M4.3 E1): GPU-off ARM RT — D3D11 layer acceleration crashes on
+// Tegra 3 / WinRT. Without this, accel is disabled ONLY by the per-PROFILE runtime
+// crash-guard, so a FRESH profile re-attempts D3D11 layer init (which already crashed).
+// Bake it off by default (profile-independent). Reversible for Phase D / a GPU target.
+pref("layers.acceleration.disabled", true);
 
 // Preferred X11 GL context provider. "auto" prefers EGL and falls back to GLX,
 // "egl" forces EGL, and "glx" forces the legacy GLX path. Restart required.
@@ -4474,6 +4483,9 @@ pref("gfx.direct2d.disabled", false);
 pref("gfx.direct2d.force-enabled", false);
 
 pref("layers.prefer-opengl", false);
+// Varan (M5 Lever D): restore the D3D9 compositor prefs (revert Issue #1841 Part 1).
+pref("layers.prefer-d3d9", false);
+pref("layers.allow-d3d9-fallback", true);
 #endif
 
 // Copy-on-write canvas

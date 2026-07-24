@@ -731,8 +731,35 @@ ParseManifest(NSLocationType aType, FileLocation& aFile, char* aBuf,
         }
       }
 
+#if defined(_M_ARM)
+      // Varan (M3): clang-cl's thumbv7-windows-msvc backend emits
+      // the MSVC virtual pointer-to-member vcall thunk (??_9nsChromeRegistry@@$B..@AA)
+      // as `ldr r1,[r0]; ldr r1,[r1,#slot]; bx r1` — it uses r1 (the AAPCS first
+      // integer-argument register = `cx`) as vtable scratch instead of r12/ip.
+      // Calling a VIRTUAL handler through the runtime pointer-to-member value
+      // (directive->regfunc) routes through that thunk and destroys `cx` before the
+      // handler runs (device crash: wild base URI -> nsIOService::NewURI AV). An
+      // ordinary obj->Method() virtual call does NOT go through the thunk (the fn
+      // ptr is loaded into a non-arg scratch, args set up after), so dispatch the 7
+      // chrome handlers DIRECTLY, keyed on the (unique-per-chrome-row) directive
+      // string. See VARAN-M3-CRASH1-NEWURI.md sec.9. Systemic bug; this is the
+      // startup-path unblock only (mgrfunc at :743 is non-virtual = unaffected).
+      {
+        nsChromeRegistry* reg = nsChromeRegistry::gChromeRegistry;
+        const char* d = directive->directive;
+        if      (!strcmp(d, "content"))  reg->ManifestContent (chromecx, line, argv, flags);
+        else if (!strcmp(d, "locale"))   reg->ManifestLocale  (chromecx, line, argv, flags);
+        else if (!strcmp(d, "skin"))     reg->ManifestSkin    (chromecx, line, argv, flags);
+        else if (!strcmp(d, "overlay"))  reg->ManifestOverlay (chromecx, line, argv, flags);
+        else if (!strcmp(d, "style"))    reg->ManifestStyle   (chromecx, line, argv, flags);
+        else if (!strcmp(d, "override")) reg->ManifestOverride(chromecx, line, argv, flags);
+        else if (!strcmp(d, "resource")) reg->ManifestResource(chromecx, line, argv, flags);
+        else { MOZ_ASSERT_UNREACHABLE("Varan: unmapped chrome manifest regfunc"); }
+      }
+#else
       (nsChromeRegistry::gChromeRegistry->*(directive->regfunc))(
         chromecx, line, argv, flags);
+#endif
     } else if (directive->ischrome || !aChromeOnly) {
       if (directive->isContract) {
         CachedDirective* cd = contracts.AppendElement();

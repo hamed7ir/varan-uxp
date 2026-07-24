@@ -254,6 +254,10 @@ _PR_MD_SET_CURRENT_THREAD_NAME(const char *name)
     info.dwThreadID = -1;
     info.dwFlags = 0;
 
+#if !defined(_M_ARM)
+    /* ARM32/UWP build spike: clang-cl cannot lower SEH (__try/__except) for thumbv7.
+       This is the legacy debugger thread-naming trick; SetThreadDescription (above,
+       Win10 1607+) is the modern path and covers the Win10M target. Skip on ARM. */
     __try {
         RaiseException(MS_VC_EXCEPTION,
                        0,
@@ -261,6 +265,7 @@ _PR_MD_SET_CURRENT_THREAD_NAME(const char *name)
                        (ULONG_PTR*)&info);
     } __except(EXCEPTION_CONTINUE_EXECUTION) {
     }
+#endif
 #endif
 }
 

@@ -330,6 +330,13 @@ void
 MacroAssemblerARM::ma_movPatchable(Imm32 imm_, Register dest, Assembler::Condition c)
 {
     int32_t imm = imm_.value;
+#if defined(VARAN_THUMB2)
+    // Varan: this is a PATCHABLE pair -- as_movw_patch/as_movt_patch rewrite these
+    // two words in place at a fixed footprint. Under Thumb-2 a conditional movw/movt expands to a
+    // B<!c>.W branch-over, which would shift both words and corrupt every later patch. All callers
+    // pass Always today; this pins it so a future one cannot silently break the patcher.
+    MOZ_ASSERT(c == Always, "VARAN: patchable movw/movt pair must be unconditional");
+#endif
     if (HasMOVWT()) {
         as_movw(dest, Imm16(imm & 0xffff), c);
         as_movt(dest, Imm16(imm >> 16 & 0xffff), c);
@@ -1167,7 +1174,26 @@ MacroAssemblerARM::ma_dataTransferN(LoadStore ls, int size, bool IsSigned,
 
     // We can encode this as a standard ldr.
     if (size == 32 || (size == 8 && !IsSigned) ) {
+        // A32 LDR/STR take a signed imm12, so ANY offset in (-4096, 4096) is one instruction.
+        // Thumb-2 is ASYMMETRIC: T3 gives an unsigned imm12 (0..4095), but the only NEGATIVE form
+        // is T4's imm8, i.e. -255..0. Keeping the A32 bound here sends every offset in
+        // [-4095, -256] down to as_dtr, where varanEmitDtr has to synthesise the address through
+        // the ip scratch -- which is wrong whenever rt or the base IS ip (it asserts, and would
+        // otherwise clobber the very register it needs).
+        //
+        // Narrowing the fast path instead routes those offsets through the decomposition just
+        // below, which uses the CALLER-PROVIDED `scratch` and is already correct.
+        //
+        // FACT: this is a pre-existing Thumb-2 gap, not a Batch A/B regression -- it only became
+        // reachable once the earlier gaps were closed and these tests started executing this far.
+        // (Symbolized chain: ma_dtr -> ma_dataTransferN -> as_dtr -> varanEmitDtr, with
+        // base=fp rt=ip off=-424.) The extdtr path below keeps its +-255 bound: that already fits
+        // T2's T3-positive / T4-negative split.
+#if defined(VARAN_THUMB2)
+        if (off < 4096 && off > -256) {
+#else
         if (off < 4096 && off > -4096) {
+#endif
             // This encodes as a single instruction, Emulating mode's behavior
             // in a multi-instruction sequence is not necessary.
             return as_dtr(ls, size, mode, rt, DTRAddr(rn, DtrOffImm(off)), cc);
@@ -1318,6 +1344,27 @@ MacroAssemblerARM::ma_popn_pc(Imm32 n, AutoRegisterScope& scratch, AutoRegisterS
     // pc <- [sp]; sp += n
     int32_t nv = n.value;
 
+#if defined(VARAN_THUMB2)
+    // B5 -- GUARDED, NOT SYNTHESISED, and that is a deliberate call backed by a reachability check.
+    //
+    // The post-index arm below accepts |nv| < 4096 (the A32 imm12 range), but Thumb-2's post-index
+    // form is T4 with an imm8, so varanEmitDtr already diverts 256..4095 to a loud UDF (0x24f).
+    // Synthesising `add sp,#n ; ldr.w pc,[sp]` for that window would be dead code:
+    //
+    //   FACT: retn(Imm32) has exactly ONE caller tree-wide -- JitRuntime::generateVMWrapper
+    //   (Trampoline-arm.cpp), with n = sizeof(ExitFrameLayout) + explicitStackSlots()*sizeof(void*)
+    //   + extraValuesToPop*sizeof(Value). Those are a VMFunction's declared stack arguments, a
+    //   single-digit count, so n is ~100 at the very most. ret() (n implicit 0) is the other entry.
+    //
+    // So the assert documents the bound instead of code that could never be exercised or tested. If
+    // a future VMFunction signature ever grows past it, this fires in debug at emit time -- which is
+    // far earlier and clearer than discovering the 0x24f UDF at runtime.
+    MOZ_ASSERT(nv >= -255 && nv <= 255,
+               "VARAN: retn(n) beyond the Thumb-2 post-index imm8 range. Synthesise "
+               "`add sp,#n ; ldr.w pc,[sp]` here -- and mind that the loaded value goes to PC, so it "
+               "must carry the Thumb bit (C7).");
+#endif
+
     if (nv < 4096 && nv >= -4096) {
         as_dtr(IsLoad, 32, PostIndex, pc, DTRAddr(sp, DtrOffImm(nv)));
     } else {
@@ -1394,6 +1441,26 @@ MacroAssemblerARM::ma_b(wasm::TrapDesc target, Assembler::Condition c)
 void
 MacroAssemblerARM::ma_bx(Register dest, Assembler::Condition c)
 {
+#if defined(VARAN_THUMB2)
+    // B1 -- THE THUMB BIT. Every JitCode-derived pointer in the engine is materialised as a raw,
+    // EVEN code address (movw/movt of code->raw(), or a load out of ICStub::stubCode_ /
+    // JSScript::baselineOrIonRaw / ResumeFromException::target). Branching to an even address puts a
+    // real core into ARM state, where it decodes our Thumb halfwords as A32 -- device-lethal, and
+    // invisible to the simulator until the B12 guard was added (it fires on a plain `f()` call).
+    //
+    // The bit is set HERE, at the branch, rather than in the stored pointer, and that is deliberate:
+    // those pointers are read back by `JitCode::FromExecutable` (`*(JitCode**)(buffer - sizeof(...))`
+    // plus `MOZ_ASSERT(code->raw() == buffer)`) and by `ICStub::jitCode()`. An odd stored value would
+    // misalign the JitCode header read on every GC trace. Keep the data even; fix the branch.
+    //
+    // Idempotent: `orr #1` on an already-odd register is a no-op, so sites whose value is already
+    // correct (varanAbsBranch, a hardware-produced lr) cost one instruction and change nothing.
+    //
+    // NOT applied to as_bx directly: `abiret()` and `EmitReturnFromIC` call as_bx with `lr`, which is
+    // already odd (set by the hardware BLX). Routing the guard through ma_bx excludes them for free
+    // and keeps EmitReturnFromIC's footprint -- which ICEntry return offsets depend on -- unchanged.
+    as_orr(dest, dest, Imm8(1), LeaveCC, c);
+#endif
     as_bx(dest, c);
 }
 
@@ -1401,7 +1468,14 @@ void
 MacroAssemblerARM::ma_b(void* target, Assembler::Condition c)
 {
     // An immediate pool is used for easier patching.
+#if defined(VARAN_THUMB2)
+    // Thumb-2: the A32 pool `ldr pc,[pool]` is device-lethal (finishPool would patch a real A32
+    // word). ma_b(void*) targets are fixed absolute code addresses (bailout table / OOL entries),
+    // never repatched -> synthesize movw/movt ip=target|1; bx ip (conditional -> branch-over).
+    varanAbsBranch(uint32_t(target), c);
+#else
     as_Imm32Pool(pc, uint32_t(target), c);
+#endif
 }
 
 // This is almost NEVER necessary: we'll basically never be calling a label,
@@ -1415,6 +1489,15 @@ MacroAssemblerARM::ma_bl(Label* dest, Assembler::Condition c)
 void
 MacroAssemblerARM::ma_blx(Register reg, Assembler::Condition c)
 {
+#if defined(VARAN_THUMB2)
+    // B1 -- see the comment in ma_bx. Same convention: OR the Thumb bit at the branch, leave the
+    // stored/patched pointer equal to code->raw(). NOT applied to as_blx directly, because
+    // MacroAssemblerARM::ma_call(ImmPtr) also reaches as_blx and its operand is a NATIVE C++
+    // function pointer (or, under the simulator, a Redirection swi address) -- OR-ing bit0 there
+    // would corrupt the redirection lookup, which derives a Redirection* by subtracting a field
+    // offset from the instruction address.
+    as_orr(reg, reg, Imm8(1), LeaveCC, c);
+#endif
     as_blx(reg, c);
 }
 
@@ -1550,7 +1633,9 @@ MacroAssemblerARM::ma_vimm(wasm::RawF64 value, FloatRegister dest, Condition cc)
             }
         }
     }
-    // Fall back to putting the value in a pool.
+    // Fall back to putting the value in a pool. The pool machinery is now Thumb-2 (Batch 4): finishPool
+    // patches this PoolVDTR hint to a real T2 VLDR-literal via as_vdtr_patch (single 4B slot -> AL only;
+    // PatchConstantPoolLoad asserts cond==AL, so any conditional double-pool caller trips loudly).
     as_FImm64Pool(dest, value, cc);
 }
 
@@ -1583,7 +1668,7 @@ MacroAssemblerARM::ma_vimm_f32(wasm::RawF32 value, FloatRegister dest, Condition
         }
     }
 
-    // Fall back to putting the value in a pool.
+    // Fall back to putting the value in a pool (now Thumb-2, single-slot AL VLDR-literal; see ma_vimm).
     as_FImm32Pool(vd, value, cc);
 }
 
@@ -3418,8 +3503,16 @@ MacroAssemblerARMCompat::loadValue(Address src, ValueOperand val)
     // If the value is lower than the type, then we may be able to use an ldm
     // instruction.
 
-    if (val.payloadReg().code() < val.typeReg().code()) {
-        if (src.offset <= 4 && src.offset >= -8 && (src.offset & 3) == 0) {
+#if defined(VARAN_THUMB2)
+    // Thumb-2 has only LDMIA/LDMDB (no DA/IB), so restrict the DTM optimization to offsets -8(DB)/0(IA);
+    // -4(DA)/+4(IB) fall through to the two-ldr path below (those ldr's convert with the load/store batch).
+    bool dtmOk = (val.payloadReg().code() < val.typeReg().code()) && (src.offset == -8 || src.offset == 0);
+#else
+    bool dtmOk = (val.payloadReg().code() < val.typeReg().code()) &&
+                 (src.offset <= 4 && src.offset >= -8 && (src.offset & 3) == 0);
+#endif
+    if (dtmOk) {
+        {
             // Turns out each of the 4 value -8, -4, 0, 4 corresponds exactly
             // with one of LDM{DB, DA, IA, IB}
             DTMMode mode;
@@ -4016,10 +4109,38 @@ MacroAssemblerARMCompat::ceilf(FloatRegister input, Register output, Label* bail
 CodeOffset
 MacroAssemblerARMCompat::toggledJump(Label* label)
 {
+#if defined(VARAN_THUMB2)
+    // Thumb-2 has NO in-place CMP<->B bit-flip analogue, so this is a redesign, not a conversion.
+    // A32 toggles bits[27:20] of ONE word and the branch's imm24[19:0] survives inside the CMP's
+    // Rn/imm12 fields. T2 cmp.w (modimm split across hw0/hw1) and B.W (T4 J-bit split) share almost
+    // no payload bits: a 1-slot toggle would DESTROY the branch offset, and ToggleToJmp could never
+    // restore it -- its only argument is the address, it has no idea what the target was.
+    //
+    // Redesign: a 2-slot site whose BRANCH WORD IS NEVER MODIFIED.
+    //     slot0 = NOP.W   -> fall into slot1 -> branch TAKEN  (enabled)
+    //     slot0 = B.W +4  -> skip slot1      -> fall through   (disabled)
+    //     slot1 = B.W target                                   (written once, never toggled)
+    // Emitting NOP.W here makes the initial state "branch taken", exactly matching the A32 emit of a
+    // bare B (BaselineCompiler's profiler/tracelogger sites document this as "initially disabled" --
+    // the feature is off because the jump over the instrumentation is taken).
+    //
+    // Toggling therefore writes one COMPLETE 32-bit word that is a compile-time constant: no field
+    // surgery, no offset preservation, no read-back of encoded operands. It is strictly stronger
+    // than the A32 form, which had to restrict branch range (ToggleToCmp asserted imm24[23:20]==0)
+    // and clobbered the condition flags with a real CMP. This one clobbers nothing.
+    //
+    // The two slots MUST stay adjacent -- a constant pool inserted between them would put pool data
+    // where slot1's branch is expected and make "skip 4 bytes" skip the wrong thing.
+    VaranForbidPoolsIfOutermost afp(this, 2);
+    BufferOffset toggleSlot = as_nop();   // slot0: NOP.W (enabled)
+    ma_b(label, Always);                  // slot1: the real branch; the toggles never touch it
+    return CodeOffset(toggleSlot.getOffset());
+#else
     // Emit a B that can be toggled to a CMP. See ToggleToJmp(), ToggleToCmp().
     BufferOffset b = ma_b(label, Always);
     CodeOffset ret(b.getOffset());
     return ret;
+#endif
 }
 
 CodeOffset
@@ -4029,10 +4150,30 @@ MacroAssemblerARMCompat::toggledCall(JitCode* target, bool enabled)
     addPendingJump(bo, ImmPtr(target->raw()), Relocation::JITCODE);
     ScratchRegisterScope scratch(asMasm());
     ma_movPatchable(ImmPtr(target->raw()), scratch, Always);
+#if defined(VARAN_THUMB2)
+    // B1 for the toggled call. The Thumb bit MUST be OR-ed in a slot of its own, emitted
+    // UNCONDITIONALLY in BOTH arms, and the branch emitted with as_blx rather than ma_blx.
+    //
+    // Why not just let ma_blx do it: ma_blx now emits `orr.w + blx` (2 words) while ma_nop() emits 1,
+    // so the enabled and disabled forms would have DIFFERENT SIZES. ToggleCall walks
+    // movw -> movt -> slot by Instruction::next() and rewrites that last word in place; a
+    // size-varying footprint means the toggle would rewrite the wrong word. In release that turns
+    // an "enable" into `movw / movt / blx ip / blx ip` (the second blx re-entering the handler --
+    // unbounded recursion), and a "disable" into a no-op that can never turn the trap off.
+    //
+    // With the orr unconditional the footprint is a uniform 16 bytes and the toggled slot stays
+    // last. ToggledCallSize, ToggleCall and Assembler::GetCF32Target are updated in lockstep.
+    as_orr(scratch, scratch, Imm8(1));
+    if (enabled)
+        as_blx(scratch);
+    else
+        ma_nop();
+#else
     if (enabled)
         ma_blx(scratch);
     else
         ma_nop();
+#endif
     return CodeOffset(bo.getOffset());
 }
 
@@ -4205,12 +4346,46 @@ MacroAssemblerARMCompat::roundf(FloatRegister input, Register output, Label* bai
 CodeOffsetJump
 MacroAssemblerARMCompat::jumpWithPatch(RepatchLabel* label, Condition cond, Label* documentation)
 {
+#if defined(VARAN_THUMB2)
+    // Thumb-2 patchable jump = a fixed 2-slot reservation [slot0, slot0+4] (NOT a branch-pool load, which
+    // would be device-lethal A32). slot0 = B<c>.W condition-carrier placeholder (byteVal 0 -> a harmless
+    // self-relative branch; the real cond is recovered later from this word); slot1 = NOP.W. bind()
+    // (assembly-time) and PatchJump (post-link) both fill the pair via VaranComputeJump2 -- in-range ->
+    // B<c>.W+NOP.W, >+-1MB -> invert+B.W (reaches +-16MB). CodeOffsetJump carries no condition, so cond
+    // must be recovered from slot0; jumpTableIndex is a dummy 0 (no pool entry). backedgeJump inherits
+    // this (Always). Retires the EncodeBccT2 loud guard: no caller now feeds >+-1MB into a 1-slot B<c>.W.
+    // ★ A1 POOL GUARD (F1 class, 5th instance). N=2: slot0 (writeBranchInstT2) + slot1 (writeInstT2).
+    // Without it the buffer can flush a constant pool BETWEEN the two writes; the pool's GUARD B.W
+    // then occupies slot0+4, and bind()/PatchJump -- which fill the pair via varanPatchCondBranch2 /
+    // VaranComputeJump2 at [slot0, slot0+4] -- would OVERWRITE the pool guard, dropping execution
+    // into pool DATA. Nesting-safe variant is mandatory: reached from regions that already hold a
+    // no-pool region, and enterNoPool() is not re-entrant (that was E1's 842-hit assert).
+    //
+    // ⚠️ HONESTY NOTE (2026-07-23): unlike its siblings this guard has NO demonstrated trigger.
+    // An early probe appeared to show 19 splits here, but that probe compared BufferOffsets without
+    // checking oom() -- on OOM the write helpers return invalid offsets, and those 19 were OOM
+    // artifacts, not pool splits. With an oom()-corrected probe this site measured ZERO genuine
+    // splits across the whole corpus (A2 measured 8 and A4 ~377, all real and all now closed).
+    // It is kept anyway: the adjacency contract above is real and verified in source (bind() and
+    // PatchJump both read slot0+4), and the corpus is a poor proxy for the IonCaches next-stub
+    // path that exercises this most. A bisect confirmed it is NOT the cause of the unaligned-read
+    // or far-jump signatures that appeared with Front A -- those survive its removal.
+    VaranForbidPoolsIfOutermost varanAfp(this, 2);
+    BufferOffset slot0 =
+        writeBranchInstT2(VaranEncodeBranchInst(/*isBL=*/false, /*byteVal=*/0, uint32_t(cond) >> 28),
+                          documentation);
+    writeInstT2(0x8000F3AFu);                            // slot1 reservation (NOP.W)
+    if (!oom())
+        label->use(slot0.getOffset());
+    return CodeOffsetJump(slot0.getOffset(), 0);
+#else
     ARMBuffer::PoolEntry pe;
     BufferOffset bo = as_BranchPool(0xdeadbeef, label, &pe, cond, documentation);
     // Fill in a new CodeOffset with both the load and the pool entry that the
     // instruction loads from.
     CodeOffsetJump ret(bo.getOffset(), pe.index());
     return ret;
+#endif
 }
 
 namespace js {
@@ -4998,6 +5173,12 @@ MacroAssembler::Pop(const ValueOperand& val)
 CodeOffset
 MacroAssembler::call(Register reg)
 {
+#if defined(VARAN_THUMB2)
+    // B1 -- see ma_bx. This is the callJitNoProfiler / loadBaselineOrIonRaw path: the register holds
+    // JSScript::baselineOrIonRaw (an even method()->raw()). The returned CodeOffset is taken AFTER
+    // the branch, so the recorded call site is unaffected by the extra instruction.
+    as_orr(reg, reg, Imm8(1));
+#endif
     as_blx(reg);
     return CodeOffset(currentOffset());
 }
@@ -5060,11 +5241,67 @@ MacroAssembler::patchCall(uint32_t callerOffset, uint32_t calleeOffset)
     as_bl(off, Always, inst);
 }
 
+#if defined(VARAN_THUMB2)
+// ---- W2 helpers: the far jump is a single patchable B.W (see farJumpWithPatch) ----
+//
+// VaranEncodeBranchInst takes `byteVal` = the target expressed relative to the BRANCH's own
+// address and internally applies the T32 pc bias (off = byteVal - 4, since pc reads as insn+4),
+// so both patchers can hand it (target - branch) directly and stay agnostic about the bias.
+
+// The unpatched marker. B.W to itself: if it were ever executed without being patched it hangs
+// at a known instruction instead of falling through into whatever follows. It also serves as the
+// "not yet patched" sentinel that UINT32_MAX provided on A32.
+static uint32_t
+VaranFarJumpPlaceholder()
+{
+    return js::jit::VaranEncodeBranchInst(/*isBL=*/false, /*byteVal=*/0, /*Always=*/14u);
+}
+
+static uint32_t
+VaranFarJumpWord(uint32_t fromOffset, uint32_t targetOffset)
+{
+    int32_t byteVal = int32_t(targetOffset) - int32_t(fromOffset);
+    // B.W is +-16MB. RELEASE, not debug: exceeding it must never silently encode a truncated
+    // displacement, which is precisely the failure mode this whole port keeps guarding against.
+    MOZ_RELEASE_ASSERT(byteVal >= -16777212 && byteVal <= 16777220,
+                       "VARAN: wasm far jump exceeds B.W range (+-16MB)");
+    return js::jit::VaranEncodeBranchInst(/*isBL=*/false, byteVal, /*Always=*/14u);
+}
+#endif
+
 CodeOffset
 MacroAssembler::farJumpWithPatch()
 {
     static_assert(32 * 1024 * 1024 - JumpImmediateRange > wasm::MaxFuncs * 3 * sizeof(Instruction),
                   "always enough space for thunks");
+#if defined(VARAN_THUMB2)
+    // ---- W2: the far-jump thunk is a REDESIGN, not a port ----
+    //
+    // The A32 thunk is three instructions and every one of them is illegal or wrong in T32:
+    //   ldr scratch,[pc,#0]   relies on the A32 pc-read being insn+8; T32 reads Align(insn+4,4),
+    //                         so [pc,#0] would load the NEXT INSTRUCTION instead of the data word;
+    //   add pc, scratch, pc   is a wide data-proc WRITING pc -- T32 has no such form (emit guard
+    //                         0x501) -- and it also READS pc as an operand (guard 0x503);
+    //   writeInst(UINT32_MAX) is a raw A32 data word, diverted here to a coded UDF (0x2ff).
+    //
+    // A literal translation would need the PC in a register plus the loaded delta in a second one,
+    // i.e. TWO scratch registers, in a trap path emitted before the frame is set up where I cannot
+    // establish that a second scratch is free. So instead:
+    //
+    // REPLACEMENT: a single patchable B.W. Both patchers already compute a displacement between
+    // two offsets in the SAME code block -- exactly what B.W encodes -- so the patch contract is
+    // unchanged, and no register is needed at all.
+    //
+    // COST, stated plainly rather than buried: B.W reaches +-16MB, where the A32 thunk was
+    // effectively unbounded -- which is the reason the thunk existed. A module with more than
+    // 16MB between a trap site and its exit stub now trips a RELEASE assert: loud and immediate,
+    // never a silently wrong branch. On the target (a 1GB Tegra 3) that is not a practical limit.
+    // If it ever becomes one, the fix is a two-register ADR+LDR+ADD+BX thunk, not a wider B.
+    VaranForbidPoolsIfOutermost afp(this, 1);
+    CodeOffset farJump(currentOffset());
+    writeInstT2(VaranFarJumpPlaceholder());
+    return farJump;
+#else
 
     // The goal of the thunk is to be able to jump to any address without the
     // usual 32MiB branch range limitation. Additionally, to make the thunk
@@ -5089,11 +5326,20 @@ MacroAssembler::farJumpWithPatch()
     writeInst(UINT32_MAX);
 
     return farJump;
+#endif
 }
 
 void
 MacroAssembler::patchFarJump(CodeOffset farJump, uint32_t targetOffset)
 {
+#if defined(VARAN_THUMB2)
+    uint32_t* u32 = reinterpret_cast<uint32_t*>(editSrc(BufferOffset(farJump.offset())));
+    // The placeholder doubles as the "not yet patched" marker the A32 code got from UINT32_MAX.
+    MOZ_ASSERT(*u32 == VaranFarJumpPlaceholder(),
+               "VARAN: far-jump slot is not an unpatched placeholder");
+    *u32 = VaranFarJumpWord(farJump.offset(), targetOffset);
+    return;
+#else
     uint32_t* u32 = reinterpret_cast<uint32_t*>(editSrc(BufferOffset(farJump.offset())));
     MOZ_ASSERT(*u32 == UINT32_MAX);
 
@@ -5103,17 +5349,26 @@ MacroAssembler::patchFarJump(CodeOffset farJump, uint32_t targetOffset)
     // When pc is read as the operand of the add, its value is the address of
     // the add instruction + 8.
     *u32 = (targetOffset - addOffset) - 8;
+#endif
 }
 
 void
 MacroAssembler::repatchFarJump(uint8_t* code, uint32_t farJumpOffset, uint32_t targetOffset)
 {
+#if defined(VARAN_THUMB2)
+    // Post-link re-patch of an ALREADY patched jump, so unlike patchFarJump there is deliberately
+    // no placeholder assert here -- that matches the A32 behaviour above.
+    *reinterpret_cast<uint32_t*>(code + farJumpOffset) =
+        VaranFarJumpWord(farJumpOffset, targetOffset);
+    return;
+#else
     uint32_t* u32 = reinterpret_cast<uint32_t*>(code + farJumpOffset);
 
     uint32_t addOffset = farJumpOffset - 4;
     MOZ_ASSERT(reinterpret_cast<Instruction*>(code + addOffset)->is<InstALU>());
 
     *u32 = (targetOffset - addOffset) - 8;
+#endif
 }
 
 CodeOffset
@@ -5279,6 +5534,37 @@ MacroAssembler::callWithABINoProfiler(const Address& fun, MoveOp::Type result)
 uint32_t
 MacroAssembler::pushFakeReturnAddress(Register scratch)
 {
+#if defined(VARAN_THUMB2)
+    // ---- C1 ----
+    //
+    // `Push(pc)` is a STORE with Rt == 15, which is UNPREDICTABLE in T32 (emit guard 0x511).
+    // It was by far the largest single item in the whole port: 5698 emissions and 499
+    // executed crashes under --ion-eager, because buildFakeExitFrame runs on every Ion exit.
+    //
+    // The A32 idiom leans on the pc-read being insn+8 -- hence the padding nop, which exists
+    // only to make the pushed value land on the following instruction. Upstream even notes
+    // the value "is never used for resuming any execution".
+    //
+    // Rather than push a junk value to fill the slot, do exactly what the arm64 backend does
+    // (`Adr(scratch, &fakeCallsite); Push(scratch); bind(&fakeCallsite)`): materialise the
+    // address just past the push with ADR and push THAT, so the pushed word is a genuinely
+    // meaningful pseudo-return address instead of a placeholder. ADR is a legal T32 PC read
+    // (Align(PC,4) + imm, PC = insn+4), and it removes the need for the padding nop -- adr(4)
+    // + push(4) = 8 bytes, so the caller's `== 8` invariant is preserved exactly.
+    //
+    // The pushed address is deliberately EVEN (no Thumb bit): it is never branched through,
+    // and any lookup that keys on the returned OFFSET must see the matching even address --
+    // the same reasoning that makes D1's callsite lookup want a masked value. arm64's Adr
+    // form is even too.
+    VaranForbidPoolsIfOutermost afp(this, 2);
+    DebugOnly<uint32_t> offsetBeforePush = currentOffset();
+    {
+        ScratchRegisterScope adrScratch(*this);
+        as_adr(adrScratch, 4);      // adrScratch = (this insn + 4) + 4 = the offset returned below
+        Push(adrScratch);
+    }
+    uint32_t pseudoReturnOffset = currentOffset();
+#else
     // On ARM any references to the pc, adds an additional 8 to it, which
     // correspond to 2 instructions of 4 bytes.  Thus we use an additional nop
     // to pad until we reach the pushed pc.
@@ -5292,6 +5578,7 @@ MacroAssembler::pushFakeReturnAddress(Register scratch)
     ma_nop();
     uint32_t pseudoReturnOffset = currentOffset();
     leaveNoPool();
+#endif
 
     MOZ_ASSERT_IF(!oom(), pseudoReturnOffset - offsetBeforePush == 8);
     return pseudoReturnOffset;

@@ -59,7 +59,10 @@ rdtsc(void)
     return result;
 
 }
-#elif defined(__arm__)
+#elif defined(__arm__) && !defined(_WIN32)
+// ARM32/UWP build spike: the Linux-ARM path pulls in Unix <sys/time.h>/gettimeofday,
+// which don't exist on Windows (clang defines __arm__ on ARM Windows too). Fall through
+// to the generic #else (returns 0 -- TraceLogging is optional profiling, off by default).
 
 #include <sys/time.h>
 

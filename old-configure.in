@@ -235,7 +235,19 @@ case "$target" in
         AC_SUBST(MSVC_C_RUNTIME_DLL)
         AC_SUBST(MSVC_CXX_RUNTIME_DLL)
 
-        AC_DEFINE(HAVE_SEH_EXCEPTIONS)
+        dnl Varan: clang-cl cannot lower structured exception handling
+        dnl (__try/__except) for the thumbv7 ARM target -- the backend rejects it with
+        dnl "SEH '__try' is not supported on this target". Skip the define for ARM so
+        dnl nscore.h's MOZ_SEH_TRY/MOZ_SEH_EXCEPT and nsZipArchive.h's
+        dnl MOZ_WIN_MEM_TRY_BEGIN/CATCH fall to their existing no-op (#else) branches
+        dnl tree-wide. DEBT: those crash-safety wrappers are inert on ARM (acceptable v0).
+        case "$target" in
+        arm-*|armv7*|aarch64*)
+            ;;
+        *)
+            AC_DEFINE(HAVE_SEH_EXCEPTIONS)
+            ;;
+        esac
 
         if test -n "$WIN32_REDIST_DIR"; then
           if test ! -d "$WIN32_REDIST_DIR"; then
@@ -245,10 +257,15 @@ case "$target" in
         fi
 
         # Check linker version
-        _LD_FULL_VERSION=`"${LD}" -v 2>&1 | sed -nre "$_MSVC_VER_FILTER"`
-        _LD_MAJOR_VERSION=`echo ${_LD_FULL_VERSION} | $AWK -F\. '{ print $1 }'`
-        if test "$_LD_MAJOR_VERSION" != "$_CC_SUITE"; then
-            AC_MSG_ERROR([The linker major version, $_LD_FULL_VERSION,  does not match the compiler suite version, $_CC_SUITE.])
+        # ARM32/UWP configure spike: lld-link is not versioned like MSVC link.exe
+        # (its `-v` banner does not match _MSVC_VER_FILTER -> empty), so skip the
+        # linker-vs-compiler-suite match for clang-cl/lld (same fix as js/src).
+        if test -z "$CLANG_CL"; then
+            _LD_FULL_VERSION=`"${LD}" -v 2>&1 | sed -nre "$_MSVC_VER_FILTER"`
+            _LD_MAJOR_VERSION=`echo ${_LD_FULL_VERSION} | $AWK -F\. '{ print $1 }'`
+            if test "$_LD_MAJOR_VERSION" != "$_CC_SUITE"; then
+                AC_MSG_ERROR([The linker major version, $_LD_FULL_VERSION,  does not match the compiler suite version, $_CC_SUITE.])
+            fi
         fi
 
         INCREMENTAL_LINKER=1
@@ -673,7 +690,9 @@ dnl ========================================================
 case "$host" in
 *mingw*)
     if test -n "$_WIN32_MSVC"; then
-        HOST_AR=lib
+        dnl Varan: clang-cl host has no MSVC lib.exe; use llvm-lib
+        dnl (accepts the same -NOLOGO/-OUT: flags).
+        if test -n "$CLANG_CL"; then HOST_AR=llvm-lib; else HOST_AR=lib; fi
         HOST_AR_FLAGS='-NOLOGO -OUT:$@'
         HOST_CFLAGS="$HOST_CFLAGS -TC -nologo"
         HOST_RANLIB='echo ranlib'
@@ -874,7 +893,9 @@ case "$target" in
         if test "$AS_BIN"; then
             AS="$(basename "$AS_BIN")"
         fi
-        AR='lib'
+        dnl Varan: clang-cl trips the MSVC-ABI branch but there is no
+        dnl MSVC lib.exe for ARM; use llvm-lib (accepts the same -NOLOGO/-OUT: flags).
+        if test -n "$CLANG_CL"; then AR='llvm-lib'; else AR='lib'; fi
         AR_FLAGS='-NOLOGO -OUT:$@'
         AR_EXTRACT=
         RANLIB='echo not_ranlib'
@@ -1079,6 +1100,17 @@ case "$target" in
             DSO_LDOPTS="$DSO_LDOPTS -MACHINE:X64"
         fi
         AC_DEFINE(_AMD64_)
+        ;;
+    arm*)
+        dnl Varan: ARM32 Windows (Thumb-2) cross target. Mirror the
+        dnl x86_64 arm: -MACHINE:ARM on the target DSO link (gated on _WIN32_MSVC,
+        dnl which clang-cl sets, not GNU_CC) + AC_DEFINE(_ARM_) so the Windows SDK
+        dnl winnt.h selects its ARM path. _ARM_ was previously supplied by the -FI
+        dnl arm-winnt-shim.h; now delivered via mozilla-config.h like _X86_/_AMD64_.
+        if test -n "$_WIN32_MSVC"; then
+            DSO_LDOPTS="$DSO_LDOPTS -MACHINE:ARM"
+        fi
+        AC_DEFINE(_ARM_)
         ;;
     *)
         AC_DEFINE(_CPU_ARCH_NOT_DEFINED)
@@ -2658,9 +2690,15 @@ AC_SUBST(MOZ_SCTP)
 AC_SUBST(MOZ_SRTP)
 AC_SUBST_LIST(MOZ_WEBRTC_X11_LIBS)
 
-dnl Use integers over floats for audio on ARM
-dnl because it's more efficient.
-if test "$CPU_ARCH" = "arm"; then
+dnl Use integers over floats for audio on ARM because it's more efficient --
+dnl EXCEPT on Windows-ARM (WinRT). Varan (M4.3b): the S16 choice is the
+dnl ARM-mobile convention (Android/Tremor), but the ONLY audio backend on Win-ARM is
+dnl WASAPI, whose stream_init HARD-REQUIRES CUBEB_SAMPLE_FLOAT32NE (cubeb_wasapi.cpp:1703
+dnl -> "Invalid format" + CUBEB_ERROR_INVALID_FORMAT on S16 -> OnMediaSinkAudioError ->
+dnl silent video). So WINNT+arm must use the desktop-Windows FLOAT32 config (also flips
+dnl MOZ_TREMOR->MOZ_VORBIS below, matching desktop). Same arm-keyed-no-WINNT-exclusion
+dnl shape as the ffi_target and arch.m4 (BUILD_ARM_NEON) fixes.
+if test "$CPU_ARCH" = "arm" -a "$OS_ARCH" != "WINNT"; then
     MOZ_SAMPLE_TYPE_S16=1
     AC_DEFINE(MOZ_SAMPLE_TYPE_S16)
     AC_SUBST(MOZ_SAMPLE_TYPE_S16)
@@ -3008,6 +3046,11 @@ i*86)
 x86_64)
   MOZ_D3D_CPU_SUFFIX=x64
   ;;
+arm*)
+  # ARM32/UWP configure spike: ARM Windows uses ANGLE-on-D3D too. The Redist/D3D/arm
+  # compiler DLL may not ship (soft AC_MSG_RESULT below, non-fatal for configure).
+  MOZ_D3D_CPU_SUFFIX=arm
+  ;;
 esac
 
 # This is potentially set in external mozconfig files; if it's set,
@@ -3158,6 +3201,12 @@ if test -n "$MOZ_LIBJPEG_TURBO" -a -n "$COMPILE_ENVIRONMENT"; then
   ;;
   WINNT:x86_64)
     LIBJPEG_TURBO_ASFLAGS="-D__x86_64__ -DPIC -DWIN64 -DMSVC"
+  ;;
+  WINNT:arm)
+    dnl Varan: no libjpeg-turbo SIMD on Win-ARM. jsimd_neon.S is A32
+    dnl (forbidden on Win RT) and the *-neon.c NEON intrinsics crash the LLVM ARM
+    dnl CodeView emitter under -Zi. Leave LIBJPEG_TURBO_ASFLAGS empty so media/libjpeg/
+    dnl moz.build falls to its jsimd_none.c (portable C) path.
   ;;
   *:arm)
     LIBJPEG_TURBO_ASFLAGS="-march=armv7-a -mfpu=neon"
@@ -4436,6 +4485,8 @@ if test "$MOZ_TREE_CAIRO"; then
           if test -n "$WIN32_D2D_SURFACE_FEATURE"; then
             MOZ_CHECK_HEADER(d3d10.h, MOZ_ENABLE_D3D10_LAYER=1)
           fi
+          dnl Varan (M5 Lever D): restore the D3D9 compositor layer (revert Issue #1841 Part 2).
+          MOZ_CHECK_HEADER(d3d9.h, MOZ_ENABLE_D3D9_LAYER=1)
         fi
         ;;
     esac
@@ -4445,6 +4496,7 @@ if test "$MOZ_TREE_CAIRO"; then
     AC_SUBST(MOZ_ENABLE_CAIRO_FT)
     AC_SUBST(MOZ_ENABLE_D2D_SURFACE)
     AC_SUBST(MOZ_ENABLE_D3D10_LAYER)
+    AC_SUBST(MOZ_ENABLE_D3D9_LAYER) dnl Varan (M5 Lever D): revert Issue #1841 Part 2
 
     AC_SUBST(PS_SURFACE_FEATURE)
     AC_SUBST(SVG_SURFACE_FEATURE)
@@ -4809,7 +4861,13 @@ MOZ_ARG_ENABLE_BOOL(shared-icu,
     MOZ_SHARED_ICU=)
 
 # We want shared ICU to always be enabled on Windows regardless of the enable bool.
-if test "$OS_ARCH" = "WINNT"; then
+# Varan: EXCEPT Windows ARM32. Shared ICU folds the data into the icu
+# DLL via the assembled icudata.s (yasm) / icudata_gas.S (GNU_AS) path -- but ARM has
+# no yasm object format and clang-cl is not GNU_AS, so config/external/icu/data would
+# build an EMPTY icudata lib (undefined icudt##_dat). Keep ICU STATIC on WINNT/arm so
+# icu.m4 sets MOZ_ICU_DATA_ARCHIVE=1: the prebuilt icudt##l.dat ships beside the exe and
+# icustubdata provides the stub symbol (the device-proven M1 js-standalone recipe).
+if test "$OS_ARCH" = "WINNT" -a "$CPU_ARCH" != "arm"; then
   MOZ_SHARED_ICU=1
 fi
 

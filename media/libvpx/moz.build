@@ -51,6 +51,18 @@ elif CONFIG['CPU_ARCH'] == 'arm':
 
     arm_asm_files = files['ARM_SOURCES']
 
+    # Varan: Win-ARM builds libvpx C-only (aligns with the tree-wide
+    # HAVE_ARM_NEON=''; config/linux/arm/vpx_config.h sets HAVE_NEON 0 / HAVE_NEON_ASM 0
+    # / CONFIG_RUNTIME_CPU_DETECT 0 for _WIN32). Drop the NEON intrinsics (they crash the
+    # LLVM ARM CodeView emitter -- "unknown codeview register D1_D2" -- under -Zi) and all
+    # ARM .asm (A32 dialect: forbidden on Win RT, faults across scheduler preemption). The
+    # C paths still decode/encode WebM; rtcd dispatches to them statically.
+    if CONFIG['OS_TARGET'] == 'WINNT':
+        arm_asm_files = [f for f in arm_asm_files
+                         if 'neon' not in f.lower() and not f.endswith('.asm')
+                            and not f.endswith('_arm.c')]  # arm glue (e.g. loopfilter_arm.c)
+                                                           # calls the dropped _neon fns -> undefined
+
     if CONFIG['VPX_AS_CONVERSION']:
         SOURCES += sorted([
             "!%s.S" % f if f.endswith('.asm') else f for f in arm_asm_files

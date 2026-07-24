@@ -49,6 +49,11 @@ detect_cpu_features (void)
 {
     arm_cpu_features_t features = 0;
 
+#if defined(_M_ARM)
+    /* Varan: clang-cl can't lower SEH (__try/__except) on thumbv7. The
+       pixman ARM NEON/SIMD fast paths are GNU-assembler (need GNU_CC) and are not built
+       under clang-cl, so report no CPU features -> pixman uses its portable C paths. */
+#else
     __try
     {
 	pixman_msvc_try_arm_simd_op ();
@@ -66,6 +71,7 @@ detect_cpu_features (void)
     __except (GetExceptionCode () == EXCEPTION_ILLEGAL_INSTRUCTION)
     {
     }
+#endif
 
     return features;
 }

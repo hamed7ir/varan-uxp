@@ -51,7 +51,10 @@ def checking(what, callback=None):
                 try:
                     ret = func(*args, **kwargs)
                 except FatalCheckError as e:
-                    error = e.message
+                    # Varan: py3-compat -- Exception has no .message
+                    # (py2-ism). Without this, a real FatalCheckError is masked by an
+                    # AttributeError instead of being reported via die() below.
+                    error = str(e)
                 display_ret = callback(ret) if callback else ret
                 if display_ret is True:
                     log.info('yes')

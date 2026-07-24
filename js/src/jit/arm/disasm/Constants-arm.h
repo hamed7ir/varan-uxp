@@ -469,7 +469,22 @@ class Instruction {
     enum {
         kInstrSize = 4,
         kInstrSizeLog2 = 2,
+#if defined(VARAN_THUMB2)
+        // Thumb-2 reads PC as Align(insn+4,4), not the A32 insn+8. This copy feeds the in-tree
+        // DISASSEMBLER only (the executing simulator has its own, corrected in
+        // Simulator::get_register), so a stale value here cannot mis-execute anything -- but it
+        // would print pc-relative targets 4 bytes high, and a disassembler that lies is worse than
+        // one that is absent when it is the thing you are using to debug a code-generation bug.
+        //
+        // Align() is a no-op under the wide-only invariant (every slot is 4-byte aligned); the
+        // constant form is kept because this enum has to stay a compile-time constant.
+        //
+        // NB the in-tree disassembler decodes A32 and prints garbage for Thumb-2 regardless (use
+        // llvm-objdump). This only stops it being wrong in one MORE way.
+        kPCReadOffset = 4
+#else
         kPCReadOffset = 8
+#endif
     };
 
     // Helper macro to define static accessors.

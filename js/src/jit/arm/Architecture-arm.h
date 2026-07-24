@@ -14,7 +14,15 @@
 #include "js/Utility.h"
 
 // GCC defines __ARM_PCS_VFP to denote a hard-float ABI target.
-#if defined(__ARM_PCS_VFP)
+// VARAN (Win-ARM32): clang-cl --target=thumbv7-windows-msvc does NOT define __ARM_PCS_VFP, yet the
+// Windows-on-ARM platform ABI (and the device-proven xptcinvoke_arm) IS hard-float (args/returns in
+// VFP d0-d7). Without this, the non-simulator device build selects soft-fp (doubles marshalled into
+// GPR pairs) -> silently wrong doubles on every JIT callWithABI. Key hardfp on _M_ARM too, mirroring
+// the vendored libffi ffitarget.h (`__ARM_PCS_VFP || _WIN32`). _M_ARM is the precise discriminator:
+// it is defined ONLY on the ARM device target, NOT on the x86 simulator host (which anyway takes the
+// dynamic UseHardFpABI() branch under JS_SIMULATOR_ARM, so this line cannot regress the sim host).
+// PHASE-4 DEVICE-CONFIRM ITEM: untestable on the sim host; verify on VENICE that doubles pass in d0-d7.
+#if defined(__ARM_PCS_VFP) || defined(_M_ARM)
 #define JS_CODEGEN_ARM_HARDFP
 #endif
 
@@ -334,7 +342,13 @@ class VFPRegister
     // What type of data is being stored in this register? UInt / Int are
     // specifically for vcvt, where we need to know how the data is supposed to
     // be converted.
-    enum RegType {
+    // VARAN: fixed UNSIGNED underlying type. This enum is stored in the 2-bit
+    // bitfield `kind` below; clang-cl (MSVC-compat) types a plain unscoped enum as
+    // signed int, so a signed 2-bit field reads UInt(0x2)->-2 and Int(0x3)->-1,
+    // silently breaking isUInt()/isSInt(). GCC/clang-arm pick unsigned for
+    // all-non-negative enums, which is why upstream never saw this. (jit/arm is
+    // compiled here for the first time — see the same class at PoolHintData/Condition.)
+    enum RegType : uint32_t {
         Single = 0x0,
         Double = 0x1,
         UInt   = 0x2,
@@ -355,8 +369,11 @@ class VFPRegister
   public:
     uint32_t code_ : 5;
   protected:
-    bool _isInvalid : 1;
-    bool _isMissing : 1;
+    // Varan M1: uint32_t (not bool) bitfields so clang-cl's MSVC layout packs them
+    // with kind_/code_ into one 32-bit unit (bool is 1-byte -> a separate unit -> 8-byte
+    // VFPRegister vs the 4 bytes the register code assumes; a silent device-only hazard).
+    uint32_t _isInvalid : 1;
+    uint32_t _isMissing : 1;
 
   public:
     constexpr VFPRegister(uint32_t r, RegType k)

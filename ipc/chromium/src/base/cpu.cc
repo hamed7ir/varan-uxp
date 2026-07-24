@@ -21,6 +21,7 @@ CPU::CPU()
 }
 
 void CPU::Initialize() {
+#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
   int cpu_info[4] = {-1};
   char cpu_string[0x20];
 
@@ -50,6 +51,11 @@ void CPU::Initialize() {
     ext_family_ = (cpu_info[0] >> 20) & 0xff;
     cpu_vendor_ = cpu_string;
   }
+#else
+  // Varan: __cpuid is an x86-only intrinsic (undefined on ARM). Leave the CPU
+  // identity at the constructor defaults (type/family/model/stepping 0, cpu_vendor_ "unknown");
+  // base::CPU is x86 feature introspection that ARM code paths do not consult.
+#endif
 }
 
 }  // namespace base

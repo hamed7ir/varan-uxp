@@ -44,6 +44,7 @@
 #include "jit/Sink.h"
 #include "jit/StupidAllocator.h"
 #include "jit/ValueNumbering.h"
+#include "jit/VaranFaultReporter.h"
 #include "jit/WasmBCE.h"
 #include "vm/Debugger.h"
 #include "vm/HelperThreads.h"
@@ -347,6 +348,12 @@ JitRuntime::initialize(JSContext* cx, AutoLockForExclusiveAccess& lock)
     jitcodeGlobalTable_ = cx->new_<JitcodeGlobalTable>();
     if (!jitcodeGlobalTable_)
         return false;
+
+    // Varan (Varan JIT, task #33): install the last-chance JIT-PC fault reporter
+    // now that the JitcodeGlobalTable exists. This is the ONE install point for every binary that
+    // runs the JIT -- the shell and the browser both reach here -- so a browser jitcode fault
+    // names script:offset + the CPSR T-bit the same way the shell does. No-op off Windows-ARM.
+    VaranInstallFaultReporter(cx);
 
     return true;
 }
@@ -1152,6 +1159,12 @@ IonScript::copyCacheEntries(const uint32_t* caches, MacroAssembler& masm)
 const SafepointIndex*
 IonScript::getSafepointIndex(uint32_t disp) const
 {
+#if defined(VARAN_THUMB2)
+    // Thumb return addresses carry the interworking bit (bit0=1 from blx); the recorded safepoint
+    // displacements are even code offsets. Mask bit0 so the odd disp finds its entry (Ion analog of
+    // the baseline icEntryFromReturnAddress fix).
+    disp &= ~uint32_t(1);
+#endif
     MOZ_ASSERT(safepointIndexEntries_ > 0);
 
     const SafepointIndex* table = safepointIndices();
@@ -1201,6 +1214,9 @@ IonScript::getSafepointIndex(uint32_t disp) const
 const OsiIndex*
 IonScript::getOsiIndex(uint32_t disp) const
 {
+#if defined(VARAN_THUMB2)
+    disp &= ~uint32_t(1);   // mask the Thumb return-address bit (see getSafepointIndex).
+#endif
     const OsiIndex* end = osiIndices() + osiIndexEntries_;
     for (const OsiIndex* it = osiIndices(); it != end; ++it) {
         if (it->returnPointDisplacement() == disp)

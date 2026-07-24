@@ -224,6 +224,14 @@ if test "$CPU_ARCH" = "arm"; then
       if test -n "$ARM_ARCH"; then
           if test "$ARM_ARCH" -lt 7; then
               BUILD_ARM_NEON=
+          elif test "$OS_ARCH" = "WINNT"; then
+              dnl Varan (M4.2 / survey-2 #13): never auto-set the GLOBAL
+              dnl BUILD_ARM_NEON on Windows-ARM. It sweeps in unverified TUs (gfx BlurNEON.cpp,
+              dnl dom AudioNodeEngineNEON.cpp, build-gated WebP NEON) that would ICE (-Zi Bug#4)
+              dnl or ship untested SIMD. M4.2 enables media-NEON EXPLICITLY per-library
+              dnl (libpng / libwebp / libjpeg-turbo own gates). Precedent: ffi_target and the
+              dnl MOZ_SAMPLE_TYPE audio branch also lacked a WINNT case.
+              BUILD_ARM_NEON=
           else
               AC_DEFINE(BUILD_ARM_NEON)
               BUILD_ARM_NEON=1

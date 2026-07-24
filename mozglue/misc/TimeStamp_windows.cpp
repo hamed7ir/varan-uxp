@@ -407,6 +407,7 @@ BaseTimeDurationPlatformUtils::ResolutionInTicks()
 static bool
 HasStableTSC()
 {
+#if defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64)
   union
   {
     int regs[4];
@@ -438,6 +439,11 @@ HasStableTSC()
   // if bit 8 is set than TSC will run at a constant rate
   // in all ACPI P-state, C-states and T-states
   return regs[3] & (1 << 8);
+#else
+  // ARM32/UWP build spike: no CPUID / invariant-TSC on ARM; the caller falls back
+  // to QueryPerformanceCounter, which is architecturally reliable on ARM Windows.
+  return false;
+#endif
 }
 
 static bool gInitialized = false;

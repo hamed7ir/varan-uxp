@@ -21,7 +21,14 @@
 // work progresses more functionality will be swapped out in favor of
 // mozilla logging implementations.
 
-#ifdef DEBUG
+// Varan (M3 Phase C): activate MOZ_LOG in this OPT bring-up build so on-device
+// first-paint diagnostics exist. palemoon.exe is GUI-subsystem (no stderr) with NO crashreporter
+// (--disable-crashreporter), so the MOZ_LOG file is the ONLY failure signal for the device trip.
+// FORCE_PR_LOG=1 is already defined by the build (mozilla-config.h; old-configure.in "runtime
+// logging"), matches the prlog.h gate (DEBUG||FORCE_PR_LOG) and canonical later-UXP Logging.h.
+// Header-only edit: per the S7 staleness rule, delete the target modules' .obj to recompile the
+// call sites -- a plain rebuild will NOT retrigger dependents.
+#if defined(DEBUG) || defined(FORCE_PR_LOG)
 #define MOZ_LOGGING_ENABLED 1
 #else
 #define MOZ_LOGGING_ENABLED 0

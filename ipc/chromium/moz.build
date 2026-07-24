@@ -145,6 +145,17 @@ if '86' not in ost and 'arm' not in ost and 'aarch64' != ost and 'mips' not in o
     SOURCES += [
         'src/base/atomicops_internals_mutex.cc',
     ]
+# Varan: clang-cl on Win-ARM has NO native atomicops path — base/atomicops.h only
+# has x86_msvc/x86_macosx/x86_gcc branches (all x86) plus the mutex fallback (atomicops_internals_
+# mutex.h), so Win-ARM lands on the mutex path and references gAtomicsMutex. The arch test above
+# excludes 'arm' (upstream assumed a native ARM atomics header, which this tree lacks), so the .cc
+# defining gAtomicsMutex was never compiled -> undefined at the xul.dll link. Compile it for Win-ARM;
+# base::Lock is provided by lock_impl_win.cc (compiled for WINNT above). Correct (a global lock),
+# perf-suboptimal — an M3 lever could add a Thumb-2-safe clang __atomic path.
+elif CONFIG['OS_TARGET'] == 'WINNT' and CONFIG['CPU_ARCH'] == 'arm':
+    SOURCES += [
+        'src/base/atomicops_internals_mutex.cc',
+    ]
 
 CXXFLAGS += CONFIG['TK_CFLAGS']
 

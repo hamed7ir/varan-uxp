@@ -279,9 +279,15 @@ ClusterIterator::Next()
         uint32_t aExtCh = 0;
         if (mPos + chLen < mLimit) {
             aExtCh = *(mPos + chLen);
-            uint32_t aLowCh = *(mPos + chLen + 1);
-            if (NS_IS_HIGH_SURROGATE(aExtCh) && NS_IS_LOW_SURROGATE(aLowCh)) {
-                aExtCh = SURROGATE_TO_UCS4(aExtCh, aLowCh);
+            // Varan (M4.1b): the outer guard ensures mPos+chLen <
+            // mLimit but NOT mPos+chLen+1 < mLimit, so reading the low surrogate at
+            // *(mPos+chLen+1) can go one char16 past the end when a cluster-extender
+            // is the penultimate unit. Only read it when in bounds.
+            if (NS_IS_HIGH_SURROGATE(aExtCh) && mPos + chLen + 1 < mLimit) {
+                uint32_t aLowCh = *(mPos + chLen + 1);
+                if (NS_IS_LOW_SURROGATE(aLowCh)) {
+                    aExtCh = SURROGATE_TO_UCS4(aExtCh, aLowCh);
+                }
             }
         }
         bool extendCluster =

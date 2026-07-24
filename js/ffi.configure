@@ -32,10 +32,23 @@ def ffi_target(target):
             'Use --with-system-ffi instead.')
 
     if target.os == 'WINNT':
-        target_dir = 'x86'
         if target.cpu == 'x86_64':
+            target_dir = 'x86'
             target_name = 'X86_WIN64'
+        elif target.cpu == 'aarch64':
+            # Varan (M4.1): Windows-ARM64 uses libffi's win64_armasm.S.
+            target_dir = 'aarch64'
+            target_name = 'AARCH64'
+        elif target.cpu == 'arm':
+            # Varan (M4.1): Windows-ARM32 uses libffi 3.4.6's MSVC
+            # backend (src/arm/sysv_msvc_arm32.S), selected in config/external/ffi/
+            # moz.build on OS_TARGET==WINNT. Previously this dropped into the x86
+            # `else` below -> FFI_TARGET=X86_WIN32 -> no arm asm -> the M2
+            # `--disable-ctypes` blocker (no OS.File -> dead async-storage/urlbar).
+            target_dir = 'arm'
+            target_name = 'ARM'
         else:
+            target_dir = 'x86'
             target_name = 'X86_WIN32'
     elif target.os == 'OSX':
         if target.cpu == 'aarch64':

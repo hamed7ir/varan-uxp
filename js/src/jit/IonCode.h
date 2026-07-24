@@ -131,7 +131,39 @@ class JitCode : public gc::TenuredCell
     }
 
     template <typename T> T as() const {
+#if defined(VARAN_THUMB2)
+        // ★ THE DEVICE FAULT (trip 1, 0xC000001D). SET THE THUMB BIT.
+        //
+        // as<T>() is the ONE conversion from a JitCode to a CALLABLE C++ function pointer, and
+        // raw() is a plain EVEN address. On ARM the low bit of a call target selects the
+        // instruction set, so calling this pointer branched to an even address, switched the core
+        // to ARM state, and decoded our Thumb-2 halfwords as A32 -> STATUS_ILLEGAL_INSTRUCTION on
+        // the very first entry into generated code. That is exactly what VENICE reported: an
+        // illegal instruction at a PC that Windows could not attribute to any module.
+        //
+        // ★ WHY THE SIMULATOR COULD NEVER CATCH THIS -- worth remembering, because it is the
+        // second time this shape has bitten. Both callers reach generated code through
+        // CALL_GENERATED_CODE (jit/JitCommon.h), and that macro has two completely different
+        // definitions:
+        //     simulator build : Simulator::call(JS_FUNC_TO_DATA_PTR(uint8_t*, entry), ...)
+        //                       -- the simulator takes the address as DATA and dispatches itself,
+        //                          so the Thumb bit is irrelevant and no oracle ever sees a branch
+        //     device build    : entry(p0, p1, ...)
+        //                       -- a REAL indirect call, where the bit is everything
+        // So this call is not merely untested on the simulator; it is structurally UNTESTABLE
+        // there. The B12 interworking oracle guards branches the JIT emits, and this branch is
+        // emitted by the C++ COMPILER, outside its reach.
+        //
+        // Fixed HERE rather than at the two call sites (JitCompartment.h enterJIT/enterBaseline)
+        // because this function's entire purpose is producing something to be branched through --
+        // both existing callers are entry trampolines invoked via CALL_GENERATED_CODE, and any
+        // future one would need the same bit. This is the C7 direction (SET when producing a call
+        // target), not the D1/D3 direction (MASK when comparing).
+        return JS_DATA_TO_FUNC_PTR(T, reinterpret_cast<uint8_t*>(
+                                          reinterpret_cast<uintptr_t>(raw()) | 1));
+#else
         return JS_DATA_TO_FUNC_PTR(T, raw());
+#endif
     }
 
     void copyFrom(MacroAssembler& masm);

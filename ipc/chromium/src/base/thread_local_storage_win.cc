@@ -130,7 +130,10 @@ void ThreadLocalStorage::ThreadExit() {
 // This magic is from http://www.codeproject.com/threads/tls.asp
 // and it works for VC++ 7.0 and later.
 
-#ifdef _WIN64
+// Varan: ARM32 Windows (ARMNT), like x64/ARM64, has no leading-underscore symbol
+// decoration -- the TLS directory is `_tls_used` (single underscore), not the x86 `__tls_used`.
+// The x86 `#else` forces `__tls_used`, left undefined on ARM. Route _M_ARM to the _WIN64 path.
+#if defined(_WIN64) || defined(_M_ARM)
 
 // This makes the linker create the TLS directory if it's not already
 // there.  (e.g. if __declspec(thread) is not used).
@@ -163,7 +166,9 @@ void NTAPI OnThreadExit(PVOID module, DWORD reason, PVOID reserved)
 // implicitly loaded.
 //
 // See VC\crt\src\tlssup.c for reference.
-#ifdef _WIN64
+// Varan: ARM (like x64) merges .CRT with .rdata, so the TLS callback must be const
+// data in const_seg -- route _M_ARM to the _WIN64 path (the x86 data_seg #else could be discarded).
+#if defined(_WIN64) || defined(_M_ARM)
 
 // .CRT section is merged with .rdata on x64 so it must be constant data.
 #pragma const_seg(".CRT$XLB")

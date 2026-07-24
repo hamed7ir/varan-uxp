@@ -158,6 +158,11 @@ nsHttpChunkedDecoder::ParseChunkRemaining(char *buf,
         // ignore a trailing CR
         if (buf[count-1] == '\r')
             count--;
+        // Varan (M4.1b): cap the accumulated chunk-size line so a
+        // chunked response that never sends '\n' can't grow mLineBuf to ~1GB ->
+        // NS_ABORT_OOM (infallible Append). 1 MiB is far beyond any real chunk header.
+        if (mLineBuf.Length() + count > 1024 * 1024)
+            return NS_ERROR_UNEXPECTED;
         mLineBuf.Append(buf, count);
     }
 

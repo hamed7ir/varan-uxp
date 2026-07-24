@@ -17,8 +17,17 @@
 #define VPX_ARCH_X86_64 0
 #define VPX_ARCH_PPC 0
 #define VPX_ARCH_LOONGARCH 0
+/* Varan: Win-ARM is NEON-off (aligns with the tree's HAVE_ARM_NEON='').
+   NEON intrinsics crash the LLVM ARM CodeView emitter under -Zi and NEON .asm is A32
+   (forbidden on Win RT). Keep C-only here + drop the NEON sources in moz.build. Real
+   Linux/arm (which also reads this config) keeps NEON. */
+#if defined(_WIN32)
+#define HAVE_NEON_ASM 0
+#define HAVE_NEON 0
+#else
 #define HAVE_NEON_ASM 1
 #define HAVE_NEON 1
+#endif
 #define HAVE_NEON_DOTPROD 0
 #define HAVE_NEON_I8MM 0
 #define HAVE_SVE 0
@@ -41,7 +50,15 @@
 #define HAVE_LSX 0
 #define HAVE_LASX 0
 #define HAVE_VPX_PORTS 1
+/* Varan: Win-ARM has no <pthread.h>/<semaphore.h>. Force libvpx's
+   built-in Win32 SRWLOCK/HANDLE/CONDITION_VARIABLE emulation (vpx_util/vpx_pthread.h
+   L23; vp8/common/threading.h L22 falls to the <windows.h> path when !HAVE_PTHREAD_H).
+   We only ever build win-arm from this linux/arm config; real Linux/arm keeps pthreads. */
+#if defined(_WIN32)
+#define HAVE_PTHREAD_H 0
+#else
 #define HAVE_PTHREAD_H 1
+#endif
 #define CONFIG_DEPENDENCY_TRACKING 1
 #define CONFIG_EXTERNAL_BUILD 1
 #define CONFIG_INSTALL_DOCS 0
@@ -60,7 +77,14 @@
 #define CONFIG_DEBUG_LIBS 0
 #define CONFIG_DEQUANT_TOKENS 0
 #define CONFIG_DC_RECON 0
+/* Varan: Win-ARM uses static (C) dispatch -- no runtime CPU probe. This
+   also removes the SEH __try feature-probe in vpx_ports/aarch32_cpudetect.c (clang-cl
+   can't lower __try on thumbv7). Real Linux/arm keeps runtime detection. */
+#if defined(_WIN32)
+#define CONFIG_RUNTIME_CPU_DETECT 0
+#else
 #define CONFIG_RUNTIME_CPU_DETECT 1
+#endif
 #define CONFIG_POSTPROC 0
 #define CONFIG_VP9_POSTPROC 0
 #define CONFIG_MULTITHREAD 1

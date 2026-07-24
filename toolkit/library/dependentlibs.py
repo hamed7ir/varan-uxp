@@ -43,11 +43,16 @@ def dependentlibs_dumpbin(lib):
     return deps
 
 def dependentlibs_mingw_objdump(lib):
-    proc = subprocess.Popen(['objdump', '-x', lib], stdout = subprocess.PIPE)
+    # Varan: the clang-cl/lld toolchain has neither MSVC `dumpbin` (the primary path
+    # OSErrors out to here) nor GNU `objdump` -- only `llvm-objdump`. Its `-x` output emits
+    # "    DLL Name: <name>" with leading SPACES, not the GNU tab, so match \s+ rather than \t or the
+    # dependency list comes back empty (and dependentlibs.list would be wrong/empty).
+    objdump = 'llvm-objdump'
+    proc = subprocess.Popen([objdump, '-x', lib], stdout = subprocess.PIPE)
     deps = []
     for line in proc.stdout:
         line = line.decode(getpreferredencoding(False))
-        match = re.match(r'\tDLL Name: (\S+)', line)
+        match = re.match(r'\s+DLL Name: (\S+)', line)
         if match:
             deps.append(match.group(1))
     proc.wait()

@@ -43,6 +43,18 @@
 #include "jit/mips32/Simulator-mips32.h"
 #include "jit/mips64/Simulator-mips64.h"
 #include "jit/ProcessExecutableMemory.h"
+
+#if defined(XP_WIN) && defined(JS_CODEGEN_ARM)
+// Varan M1: FlushInstructionCache / GetCurrentProcess for the ARM Windows cacheFlush.
+# include <windows.h>
+// Varan JIT (2026-07-22): __dmb / __isb + _ARM_BARRIER_SY for the I-cache coherence
+// barriers in cacheFlush(). clang-cl provides the MSVC ARM intrinsics on this target.
+// NOT pulled in on the simulator builds -- they take the JS_SIMULATOR_ARM arm of
+// cacheFlush() and an x86 host has no such intrinsic.
+# if !defined(JS_SIMULATOR_ARM)
+#  include <intrin.h>
+# endif
+#endif
 #include "js/GCAPI.h"
 #include "js/HashTable.h"
 #include "js/Vector.h"
@@ -253,6 +265,37 @@ class ExecutableAllocator
 #else
         _flush_cache(reinterpret_cast<char*>(code), size, BCACHE);
 #endif
+    }
+#elif defined(JS_CODEGEN_ARM) && defined(XP_WIN)
+    static void cacheFlush(void* code, size_t size)
+    {
+        // Varan M1: ARM Windows instruction-cache flush after JIT codegen. Without
+        // it the CPU may execute stale icache -> nondeterministic crashes on device.
+        // (RWX execution is known to work on this device.)
+        //
+        // ★ Varan JIT (2026-07-22): DMB before / ISB after. DEVICE FACT from the viability
+        // spike -- the I-cache is NOT auto-coherent on this Cortex-A9, so a code patch is only
+        // safe once the writes are visible and the pipeline has been resynchronised:
+        //
+        //   DMB(SY)  the code STORES must be observable to the instruction fetch before the
+        //            flush is requested. Without it the flush can race writes still sitting in
+        //            the store buffer -- the classic "worked in the debugger" failure.
+        //   ISB(SY)  discards anything already prefetched/decoded from the old bytes. The
+        //            FlushInstructionCache call alone does not resynchronise THIS core's
+        //            pipeline.
+        //
+        // SY, not ISH: this must order against the instruction fetch, which is not merely an
+        // inner-shareable data observer. No caller-side DSB is added -- FlushInstructionCache
+        // is the system call that performs the maintenance, and duplicating its ordering here
+        // would be cargo-cult rather than protection.
+        //
+        // These intrinsics compile to the same DMB/DSB/ISB the assembler now emits (A2) -- this
+        // edit was left bare until the barrier encoders existed, because emitting a barrier the
+        // backend could not encode would have been a UDF at the single most safety-critical
+        // point in the JIT.
+        __dmb(_ARM_BARRIER_SY);
+        FlushInstructionCache(GetCurrentProcess(), code, size);
+        __isb(_ARM_BARRIER_SY);
     }
 #elif defined(JS_CODEGEN_ARM) && (defined(__FreeBSD__) || defined(__NetBSD__))
     static void cacheFlush(void* code, size_t size)

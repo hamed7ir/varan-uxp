@@ -6587,6 +6587,15 @@ GetABI(JSContext* cx, HandleValue abiType, ffi_abi* result)
 #if defined(_WIN64)
     *result = FFI_WIN64;
     return true;
+// Varan (M4.1): Windows-ARM32 is _WIN32 but has a SINGLE calling
+// convention (AAPCS) -- thiscall/stdcall/winapi all collapse to the default ABI.
+// libffi's ARM ffitarget.h defines no FFI_THISCALL/FFI_STDCALL/FFI_WIN64, so we
+// must ALIAS these to FFI_DEFAULT_ABI (not reject them): OS.File's Win32 layer
+// (osfile_win_back.jsm) declares EVERY function with ctypes.winapi_abi, and a
+// rejected ABI makes each WinFile.* "not a function" -> OS.File dead.
+#elif defined(_M_ARM)
+    *result = FFI_DEFAULT_ABI;
+    return true;
 #elif defined(_WIN32)
     *result = FFI_THISCALL;
     return true;
@@ -6595,7 +6604,11 @@ GetABI(JSContext* cx, HandleValue abiType, ffi_abi* result)
 #endif
   case ABI_STDCALL:
   case ABI_WINAPI:
-#if (defined(_WIN32) && !defined(_WIN64)) || defined(_OS2)
+#if defined(_M_ARM)
+    // Windows-ARM32: stdcall/winapi are the single AAPCS default ABI (see above).
+    *result = FFI_DEFAULT_ABI;
+    return true;
+#elif (defined(_WIN32) && !defined(_WIN64)) || defined(_OS2)
     *result = FFI_STDCALL;
     return true;
 #elif (defined(_WIN64))

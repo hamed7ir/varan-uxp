@@ -46,6 +46,26 @@
 #include "vm/UnboxedObject-inl.h"
 
 using mozilla::DebugOnly;
+// ---- C7 (Batch F): the Thumb bit on SYNTHESIZED code addresses ----------------------------------
+// These are addresses built in C++ as `code->raw() + offset` and later branched through via
+// `ldr pc` / `bx lr`. On Thumb-2 the low bit of a branch target selects the instruction set: odd =
+// Thumb, EVEN = ARM. B1 ORs the bit at the branch for everything that reaches PC through a register
+// (ma_bx / ma_blx / call(Register)), but these three sinks have NO branch-time register to OR --
+// ret() -> `ldr.w pc,[sp],#4`, retn() -> ma_popn_pc, and EmitReturnFromIC's raw `bx lr` fed by
+// EmitChangeICReturnAddress -- so the bit must be set at CONSTRUCTION.
+//
+// Applied ONLY at the sites the C7 consumer audit cleared
+// (jit-recon/c7-consumers/C7-CONSUMERS.md). Deliberately NOT applied to
+// prologue/epilogue/postDebugPrologue addrs, IonOsrTempData::jitcode, rfe->target, yieldEntryList or
+// BaselineFrame::initForOsr (all reach PC only through ma_bx, so B1 already covers them), and NEVER
+// to CodeLocation::repoint -- PatchJump does PC-relative `target - s0` arithmetic there and bit0
+// would produce off-by-one branch offsets. Over-applying this fix is itself the bug.
+#if defined(VARAN_THUMB2)
+# define VARAN_C7_ORBIT(x) ((decltype(x))(uintptr_t(x) | 1))
+#else
+# define VARAN_C7_ORBIT(x) (x)
+#endif
+
 
 namespace js {
 namespace jit {
@@ -4699,7 +4719,8 @@ ICSetProp_Fallback::Compiler::generateStubCode(MacroAssembler& masm)
 void
 ICSetProp_Fallback::Compiler::postGenerateStubCode(MacroAssembler& masm, Handle<JitCode*> code)
 {
-    cx->compartment()->jitCompartment()->initBaselineSetPropReturnAddr(code->raw() + returnOffset_);
+    cx->compartment()->jitCompartment()->initBaselineSetPropReturnAddr(
+        VARAN_C7_ORBIT(code->raw() + returnOffset_));
 }
 
 static void
@@ -6481,7 +6502,8 @@ ICCall_Fallback::Compiler::postGenerateStubCode(MacroAssembler& masm, Handle<Jit
     if (MOZ_UNLIKELY(isSpread_))
         return;
 
-    cx->compartment()->jitCompartment()->initBaselineCallReturnAddr(code->raw() + returnOffset_,
+    cx->compartment()->jitCompartment()->initBaselineCallReturnAddr(
+        VARAN_C7_ORBIT(code->raw() + returnOffset_),
                                                                     isConstructing_);
 }
 
@@ -7556,10 +7578,14 @@ ICTableSwitch::Compiler::getStub(ICStubSpace* space)
 void
 ICTableSwitch::fixupJumpTable(JSScript* script, BaselineScript* baseline)
 {
-    defaultTarget_ = baseline->nativeCodeForPC(script, (jsbytecode*) defaultTarget_);
+    // C7: these entries are loaded and branched through by ICTableSwitch's stub via
+    // EmitChangeICReturnAddress + EmitReturnFromIC's raw `bx lr` -- no branch-time register, so the
+    // Thumb bit must be set here. nativeCodeForPC itself is NOT touched: its other callers either
+    // reach PC through ma_bx (B1-covered) or read the pointer as an instruction stream.
+    defaultTarget_ = VARAN_C7_ORBIT(baseline->nativeCodeForPC(script, (jsbytecode*) defaultTarget_));
 
     for (int32_t i = 0; i < length_; i++)
-        table_[i] = baseline->nativeCodeForPC(script, (jsbytecode*) table_[i]);
+        table_[i] = VARAN_C7_ORBIT(baseline->nativeCodeForPC(script, (jsbytecode*) table_[i]));
 }
 
 //
@@ -8041,7 +8067,9 @@ DoRetSubFallback(JSContext* cx, BaselineFrame* frame, ICRetSub_Fallback* stub,
     JSScript* script = frame->script();
     uint32_t offset = uint32_t(val.toInt32());
 
-    *resumeAddr = script->baselineScript()->nativeCodeForPC(script, script->offsetToPC(offset));
+    // C7: set the bit BEFORE the ICRetSub_Resume::Compiler below copies *resumeAddr into the stub's
+    // addr_ -- one edit then covers both consumers.
+    *resumeAddr = VARAN_C7_ORBIT(script->baselineScript()->nativeCodeForPC(script, script->offsetToPC(offset)));
 
     if (stub->numOptimizedStubs() >= ICRetSub_Fallback::MAX_OPTIMIZED_STUBS)
         return true;

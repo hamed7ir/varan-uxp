@@ -21,7 +21,36 @@ SOURCES += [
     'yuv.c',
 ]
 
-if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['BUILD_ARM_NEON']:
+# Varan (M4.2 Stage C, 2026-07-19): Windows-on-ARM (thumbv7-windows-msvc)
+# libwebp NEON via the PURE-C intrinsics. clang-cl targets thumbv7 with NEON on by default
+# (__ARM_NEON/_M_ARM), and dsp.h (already Goanna-hardened, :116-121/:138-143) keys WEBP_USE_NEON
+# off WEBP_HAVE_NEON on the _MSC_VER+_M_ARM path -> DEFINES['WEBP_HAVE_NEON'] is the single lever.
+# CRITICAL: do NOT apply CONFIG['NEON_FLAGS'] (GNU -mfpu=neon) -- clang-cl rejects it and no flag
+# is needed. PER-LIBRARY ONLY: the global BUILD_ARM_NEON stays '' (arch.m4 WINNT guard). No .S.
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] == 'WINNT':
+    SOURCES += [
+        'alpha_processing_neon.c',
+        'cost_neon.c',
+        'dec_neon.c',
+        'enc_neon.c',
+        'filters_neon.c',
+        'lossless_enc_neon.c',
+        'lossless_neon.c',
+        'rescaler_neon.c',
+        'upsampling_neon.c',
+        'yuv_neon.c',
+    ]
+    DEFINES['WEBP_HAVE_NEON'] = 1;
+    # dec_neon.c + enc_neon.c trigger the clang-cl thumbv7 -Zi CodeView ICE (Bug #4,
+    # "unknown codeview register D1_D2" on NEON D-register-pair allocations). Appending
+    # -gline-tables-only AFTER the global -Zi drops the local-variable/register CodeView
+    # the emitter chokes on while KEEPING line tables (triage value; M5 has no ARM stack
+    # traces). PROVEN standalone: neutralizes the ICE, clang-cl-accepted (unlike -g0, which
+    # clang-cl ignores as unknown so -Zi survives). The other 8 libwebp + all 15 libjpeg
+    # NEON TUs compile clean under full -Zi (Bug #4 is narrow to these two).
+    SOURCES['dec_neon.c'].flags += ['-gline-tables-only']
+    SOURCES['enc_neon.c'].flags += ['-gline-tables-only']
+elif CONFIG['CPU_ARCH'] == 'arm' and CONFIG['BUILD_ARM_NEON']:
     SOURCES += [
         'alpha_processing_neon.c',
         'cost_neon.c',

@@ -141,6 +141,9 @@ public:
     /**
      * Get array of yuv to rgb conversion matrix.
      */
+    // Varan (M5 Lever D): restore the 4x3 row-major limited-range YUV->RGB matrix the D3D9
+    // compositor's pixel shader expects (removed by Issue #2101; unrelated to the 4x4 API below).
+    static float* Get4x3YuvColorMatrix(YUVColorSpace aYUVColorSpace);
     static const float* YuvToRgbMatrix4x4XRowMajor(YUVColorSpace aYUVColorSpace,
                                                    ColorRange aColorRange);
 

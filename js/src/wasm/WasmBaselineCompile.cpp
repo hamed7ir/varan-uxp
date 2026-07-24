@@ -2448,14 +2448,37 @@ class BaseCompiler
         masm.bind(&here);
         uint32_t offset = here.offset() - theTable->offset();
 
-        // Read PC+8
+        // ★ Varan (B12 root cause). This whole ARM arm was written for A32 and had NO VARAN_THUMB2
+        // path -- WasmBaselineCompile.cpp is not one of the three wasm/ files that were ever audited.
+        //
+        // `ma_mov(pc, scratch)` -> `as_mov(scratch, O2Reg(pc))`, i.e. a PC READ, and the pipeline
+        // offset it yields is ARCHITECTURE-DEPENDENT:
+        //     A32     : PC + 8
+        //     Thumb-2 : Align(PC + 4, 4)      <- 4 LESS
+        // Our simulator states exactly this and is the authority here (Simulator-arm.cpp:1296-1311,
+        // get_register(): "Thumb-2 reads PC as Align(current + 4, 4). The A32 value is current + 8
+        // ... which is +4 too high for every T2 pc-relative form").
+        //
+        // With the A32 `+8` the computed table base is 4 bytes off, so the `ldr pc, [table + idx*4]`
+        // below reads a word that is NOT a table entry. That word is almost always EVEN, so the
+        // interworking load drops the core into ARM state -> 0xC000001D on device. On the simulator
+        // it is caught by the B12 even-target guard; ON DEVICE IT IS SILENT.
+        //
+        // ⚠️ The fix is the CONSTANT, not a Thumb bit. This is PC-RELATIVE ARITHMETIC -- the LEAVE
+        // category of THE RULE. The table ENTRIES are already correct: jumpTable() writes them via
+        // writeCodePointer/CodeLabel -> Assembler::Bind, which sets bit0 (the D2 fix). It was never
+        // the entries; it was the dispatch that indexes them.
         masm.ma_mov(pc, scratch);
 
         // Required by ma_sub.
         ScratchRegisterScope arm_scratch(*this);
 
         // Compute the table base pointer
+#if defined(VARAN_THUMB2)
+        masm.ma_sub(Imm32(offset + 4), scratch, arm_scratch);
+#else
         masm.ma_sub(Imm32(offset + 8), scratch, arm_scratch);
+#endif
 
         // Jump indirect via table element
         masm.ma_ldr(DTRAddr(scratch, DtrRegImmShift(switchValue.reg, LSL, 2)), pc, Offset,

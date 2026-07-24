@@ -68,7 +68,13 @@ EmitEnterTypeMonitorIC(MacroAssembler& masm,
 inline void
 EmitReturnFromIC(MacroAssembler& masm)
 {
+#if defined(VARAN_THUMB2)
+    // Thumb-2: `mov pc, lr` (T3) is UNPREDICTABLE. Return via `bx lr`, which interworks
+    // correctly because lr carries the Thumb interworking bit (set by the calling blx).
+    masm.as_bx(lr);
+#else
     masm.ma_mov(lr, pc);
+#endif
 }
 
 inline void

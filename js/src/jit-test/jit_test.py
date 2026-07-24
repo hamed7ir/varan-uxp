@@ -11,13 +11,18 @@ def add_libdir_to_path():
     from os.path import dirname, exists, join, realpath
     js_src_dir = dirname(dirname(realpath(sys.argv[0])))
     assert exists(join(js_src_dir, 'jsapi.h'))
+    # VARAN: js/src/tests/lib is a package (has __init__.py), and both jittests.py and
+    # tests.py live in it. Add its PARENT (js/src/tests) and import them as package members
+    # (`from lib import ...`) so jittests.py's relative imports (.tasks_win/.progressbar/
+    # .results) resolve; the original top-level `import jittests` fails with
+    # "relative import in non-package" on Windows (the .tasks_win branch).
     sys.path.insert(0, join(js_src_dir, 'lib'))
-    sys.path.insert(0, join(js_src_dir, 'tests', 'lib'))
+    sys.path.insert(0, join(js_src_dir, 'tests'))
 
 add_libdir_to_path()
 
-import jittests
-from tests import get_jitflags, valid_jitflags, get_cpu_count, get_environment_overlay, \
+from lib import jittests
+from lib.tests import get_jitflags, valid_jitflags, get_cpu_count, get_environment_overlay, \
                   change_env
 
 # Python 3.3 added shutil.which, but we can't use that yet.

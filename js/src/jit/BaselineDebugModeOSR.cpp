@@ -21,6 +21,26 @@ using namespace js;
 using namespace js::jit;
 
 using mozilla::DebugOnly;
+// ---- C7 (Batch F): the Thumb bit on SYNTHESIZED code addresses ----------------------------------
+// These are addresses built in C++ as `code->raw() + offset` and later branched through via
+// `ldr pc` / `bx lr`. On Thumb-2 the low bit of a branch target selects the instruction set: odd =
+// Thumb, EVEN = ARM. B1 ORs the bit at the branch for everything that reaches PC through a register
+// (ma_bx / ma_blx / call(Register)), but these three sinks have NO branch-time register to OR --
+// ret() -> `ldr.w pc,[sp],#4`, retn() -> ma_popn_pc, and EmitReturnFromIC's raw `bx lr` fed by
+// EmitChangeICReturnAddress -- so the bit must be set at CONSTRUCTION.
+//
+// Applied ONLY at the sites the C7 consumer audit cleared
+// (varan-jit/recon + jit-recon/c7-consumers/C7-CONSUMERS.md). Deliberately NOT applied to
+// prologue/epilogue/postDebugPrologue addrs, IonOsrTempData::jitcode, rfe->target, yieldEntryList or
+// BaselineFrame::initForOsr (all reach PC only through ma_bx, so B1 already covers them), and NEVER
+// to CodeLocation::repoint -- PatchJump does PC-relative `target - s0` arithmetic there and bit0
+// would produce off-by-one branch offsets. Over-applying this fix is itself the bug.
+#if defined(VARAN_THUMB2)
+# define VARAN_C7_ORBIT(x) ((decltype(x))(uintptr_t(x) | 1))
+#else
+# define VARAN_C7_ORBIT(x) (x)
+#endif
+
 
 struct DebugModeOSREntry
 {
@@ -417,7 +437,9 @@ PatchBaselineFramesForDebugMode(JSContext* cx, const Debugger::ExecutionObservab
                 //
                 // Since we're using the same IC stub code, we can resume
                 // directly to the IC resume address.
-                uint8_t* retAddr = bl->returnAddressForIC(bl->icEntryFromPCOffset(pcOffset));
+                // OR on the LOCAL, before BOTH forwardLiveIterators and setReturnAddress: ORing at
+                // only one of the two would desynchronize the live iterator from the frame.
+                uint8_t* retAddr = VARAN_C7_ORBIT(bl->returnAddressForIC(bl->icEntryFromPCOffset(pcOffset)));
                 SpewPatchBaselineFrame(prev->returnAddress(), retAddr, script, kind, pc);
                 DebugModeOSRVolatileJitFrameIterator::forwardLiveIterators(
                     cx, prev->returnAddress(), retAddr);
@@ -1053,9 +1075,12 @@ JitRuntime::getBaselineDebugModeOSRHandlerAddress(JSContext* cx, bool popFrameRe
 {
     if (!getBaselineDebugModeOSRHandler(cx))
         return nullptr;
-    return popFrameReg
-           ? baselineDebugModeOSRHandler_->raw()
-           : baselineDebugModeOSRHandlerNoFrameRegPopAddr_;
+    void* addr = popFrameReg
+                 ? (void*) baselineDebugModeOSRHandler_->raw()
+                 : baselineDebugModeOSRHandlerNoFrameRegPopAddr_;
+    // Both arms, not the field. The raw() arm is nominally B1-class, but it lands on the SAME
+    // uncovered VM-wrapper retn() -> ldr pc, so it co-lands here rather than waiting for a later batch.
+    return VARAN_C7_ORBIT(addr);
 }
 
 static void

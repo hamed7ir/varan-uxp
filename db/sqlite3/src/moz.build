@@ -71,6 +71,28 @@ if CONFIG['OS_ARCH'] == 'WINNT' and CONFIG['MOZ_MEMORY']:
     DEFINES['HAVE_MALLOC_USABLE_SIZE'] = True
     DEFINES['SQLITE_WITHOUT_MSIZE'] = True
     CFLAGS += ['-wd4013']
+    # Varan: -wd4013 (MSVC C4013 warning-number suppress) has no clang-cl
+    # equivalent; clang-cl promotes the missing malloc_usable_size prototype to a hard
+    # -Wimplicit-function-declaration error (mozjemalloc provides it at link). Silence it.
+    if CONFIG['CLANG_CL']:
+        CFLAGS += ['-Wno-implicit-function-declaration']
+
+# Varan: SQLite has its own _MSC_VER-gated SEH (SQLITE_USE_SEH -> SEH_TRY/
+# SEH_EXCEPT), independent of the tree-wide HAVE_SEH_EXCEPTIONS gate. clang-cl can't lower
+# __try on thumbv7, so opt SQLite out of SEH on ARM (native SQLITE_OMIT_SEH override).
+if CONFIG['CPU_ARCH'] == 'arm':
+    DEFINES['SQLITE_OMIT_SEH'] = True
+    # sqlite3MemoryBarrier() picks the MSVC `_ReadWriteBarrier()` branch on clang-cl
+    # (_MSC_VER set, __GNUC__ not) -> undefined on ARM. Provide the barrier explicitly via
+    # SQLITE_MEMORY_BARRIER, which short-circuits that chain to a real full fence (clang-cl
+    # supports the __sync_synchronize GCC builtin on ARM).
+    # Varan (S7): pass this via CFLAGS, NOT DEFINES. DEFINES also flow into the
+    # SYMBOLS_FILE generate_symbols_file action, whose command mozmake runs through `sh -c`; the
+    # unquoted `()` in `__sync_synchronize()` is a shell syntax error ("unexpected token `('")
+    # -> mozsqlite3.dll.def fails to generate -> mozsqlite3.dll (and xul, which links it) can't
+    # link. CFLAGS is compile-only (not passed to generate_symbols_file), and the barrier only
+    # matters for the C compile (sqlite3.c). Verified: the def command carries DEFINES but no CFLAGS.
+    CFLAGS += ['-DSQLITE_MEMORY_BARRIER=__sync_synchronize()']
 
 # Omit unused functions to save some library footprint.
 DEFINES['SQLITE_OMIT_DEPRECATED'] = True

@@ -58,6 +58,19 @@
 #ifdef XP_WIN
 # include "jswin.h"
 #endif
+#if defined(XP_WIN)
+// Varan: u_setDataDirectory(), so the shell can find icudt*.dat next to
+// itself the way the browser does (XPCOMInit.cpp). See the call site in main().
+# include "unicode/putil.h"
+#endif
+
+#if defined(XP_WIN) && defined(_M_ARM)
+// Varan -- the VARAN DEVICE FAULT REPORTER + JIT-PC resolver moved to
+// jit/VaranFaultReporter.{h,cpp} so the shell and the browser share ONE copy. It is now
+// installed automatically from JitRuntime::initialize (jit/Ion.cpp) for every binary that
+// runs the JIT, so the shell no longer installs its own. The resolver is reachable here as
+// js::jit::VaranResolveJitPc (used by varanJitPcSelfTest below).
+#endif
 #include "jswrapper.h"
 #include "shellmoduleloader.out.h"
 
@@ -68,6 +81,8 @@
 #include "jit/arm/Simulator-arm.h"
 #include "jit/InlinableNatives.h"
 #include "jit/Ion.h"
+#include "jit/BaselineJIT.h"
+#include "jit/VaranFaultReporter.h"
 #include "jit/JitcodeMap.h"
 #include "jit/OptimizationTracking.h"
 #include "js/CompileOptions.h"
@@ -5990,6 +6005,151 @@ WasmLoop(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+// ============================================================================
+// Varan -- the JIT-PC RESOLVER now lives in jit/VaranFaultReporter.{h,cpp}
+// (js::jit::VaranResolveJitPc), shared by the shell and the browser. varanJitPcSelfTest below
+// calls it directly with cx->runtime(). See that file for the full rationale (why not
+// RtlAddGrowableFunctionTable; fault-path allocation/lock safety; mask-never-set on bit0).
+
+// ----------------------------------------------------------------------------
+// varanJitPcSelfTest(fn) -- NON-VACUOUS proof that the resolver names the RIGHT location.
+//
+// "It printed something" is not a test. This checks the resolver against ground truth that comes
+// from a DIFFERENT source than the resolver itself -- BaselineScript's own PCMappingIndexEntry
+// array, which records exact (nativeOffset, pcOffset) pairs -- and it includes negative controls,
+// so a resolver that always answered, or always answered the same thing, fails.
+//
+//   1. SWEEP        every Thumb halfword of the compiled method resolves, to THIS script, with a
+//                   bytecode offset inside the script, and monotonically non-decreasing as the
+//                   native offset rises. A wrong-entry or garbage-offset resolver breaks monotonicity.
+//   2. GROUND TRUTH at each index entry i, the resolved bytecode offset must lie in
+//                   [pcOffset(i), pcOffset(i+1)). It is a bracket rather than an equality because
+//                   approximatePcForNativeAddress deliberately returns the LAST bytecode sharing a
+//                   native offset (ops such as JSOP_INT8 emit no code), so equality would fail for
+//                   correct behaviour. The bracket is still tight enough that an off-by-one entry
+//                   fails it.
+//   3. NEGATIVE     a static-code address and a stack address must NOT resolve. Without this the
+//                   whole test could pass vacuously.
+// ----------------------------------------------------------------------------
+static bool
+VaranJitPcSelfTest(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() < 1 || !args[0].isObject() || !args[0].toObject().is<JSFunction>()) {
+        JS_ReportErrorASCII(cx, "varanJitPcSelfTest: expected a function");
+        return false;
+    }
+
+    RootedFunction fun(cx, &args[0].toObject().as<JSFunction>());
+    if (!fun->isInterpreted() || !fun->nonLazyScript()) {
+        JS_ReportErrorASCII(cx, "varanJitPcSelfTest: not an interpreted function");
+        return false;
+    }
+    RootedScript script(cx, fun->nonLazyScript());
+    if (!script->hasBaselineScript()) {
+        JS_ReportErrorASCII(cx, "varanJitPcSelfTest: no BaselineScript -- run under "
+                                "--baseline-eager and call the function at least once first");
+        return false;
+    }
+
+    js::jit::BaselineScript* bs = script->baselineScript();
+    uint8_t* base = bs->method()->raw();
+    uint32_t size = bs->method()->instructionsSize();
+    JSRuntime* rt = cx->runtime();
+    char buf[512];
+
+    // ---- 1. sweep ----
+    uint32_t checked = 0, lastBc = 0, firstBc = UINT32_MAX;
+    for (uint32_t o = 0; o < size; o += 2) {
+        JSScript* got = nullptr;
+        uint32_t bc = UINT32_MAX;
+        if (!js::jit::VaranResolveJitPc(rt, base + o, buf, sizeof(buf), &got, &bc)) {
+            JS_ReportErrorASCII(cx, "varanJitPcSelfTest: native +0x%x did not resolve (%s)",
+                                (unsigned)o, buf);
+            return false;
+        }
+        if (got != script) {
+            JS_ReportErrorASCII(cx, "varanJitPcSelfTest: native +0x%x resolved to the WRONG script",
+                                (unsigned)o);
+            return false;
+        }
+        if (bc == UINT32_MAX || bc >= script->length()) {
+            JS_ReportErrorASCII(cx, "varanJitPcSelfTest: native +0x%x -> bytecode offset %u out of "
+                                "range (script length %u)", (unsigned)o, (unsigned)bc,
+                                (unsigned)script->length());
+            return false;
+        }
+        if (checked && bc < lastBc) {
+            JS_ReportErrorASCII(cx, "varanJitPcSelfTest: NOT MONOTONE at native +0x%x: bytecode "
+                                "offset went %u -> %u", (unsigned)o, (unsigned)lastBc, (unsigned)bc);
+            return false;
+        }
+        if (firstBc == UINT32_MAX)
+            firstBc = bc;
+        lastBc = bc;
+        checked++;
+    }
+
+    // ---- 2. ground truth from the PCMappingIndexEntry array ----
+    size_t nIdx = bs->numPCMappingIndexEntries();
+    uint32_t bracketed = 0;
+    for (size_t i = 0; i < nIdx; i++) {
+        js::jit::PCMappingIndexEntry& ie = bs->pcMappingIndexEntry(i);
+        uint32_t lo = ie.pcOffset;
+        uint32_t hi = (i + 1 < nIdx) ? bs->pcMappingIndexEntry(i + 1).pcOffset
+                                     : (uint32_t)script->length();
+        JSScript* got = nullptr;
+        uint32_t bc = UINT32_MAX;
+        js::jit::VaranResolveJitPc(rt, base + ie.nativeOffset, buf, sizeof(buf), &got, &bc);
+        if (got != script || bc < lo || bc >= hi) {
+            JS_ReportErrorASCII(cx, "varanJitPcSelfTest: GROUND TRUTH FAIL at index entry %u "
+                                "(native +0x%x): expected bytecode in [%u,%u), got %u",
+                                (unsigned)i, (unsigned)ie.nativeOffset, (unsigned)lo,
+                                (unsigned)hi, (unsigned)bc);
+            return false;
+        }
+        bracketed++;
+    }
+
+    // ---- 3. negative controls -- without these the test could pass vacuously ----
+    int onStack = 0;
+    if (js::jit::VaranResolveJitPc(rt, (void*)&VaranJitPcSelfTest, buf, sizeof(buf), nullptr, nullptr)) {
+        JS_ReportErrorASCII(cx, "varanJitPcSelfTest: a static code address RESOLVED (%s) -- the "
+                                "resolver answers unconditionally and proves nothing", buf);
+        return false;
+    }
+    if (js::jit::VaranResolveJitPc(rt, (void*)&onStack, buf, sizeof(buf), nullptr, nullptr)) {
+        JS_ReportErrorASCII(cx, "varanJitPcSelfTest: a stack address RESOLVED (%s)", buf);
+        return false;
+    }
+
+    // Show one real resolution so a human can eyeball that it names the expected script.
+    js::jit::VaranResolveJitPc(rt, base + size / 2, buf, sizeof(buf), nullptr, nullptr);
+    fprintf(stderr, "varanJitPcSelfTest: PASS  method @%p size 0x%x  "
+                    "%u halfwords swept (bytecode %u..%u), %u index entries bracketed, "
+                    "2 negative controls held\n  midpoint -> %s\n",
+            base, (unsigned)size, (unsigned)checked, (unsigned)firstBc, (unsigned)lastBc,
+            (unsigned)bracketed, buf);
+    fflush(stderr);
+
+    args.rval().setInt32((int32_t)checked);
+    return true;
+}
+
+// varanTestFault() -- prove on the DEVICE that the fault filter actually fires and prints.
+// A null dereference is deliberate: it is the one fault we can raise with no new machinery and no
+// writes to executable memory. It does not exercise jitcode attribution (varanJitPcSelfTest does
+// that, on the same silicon); it proves the filter is installed, runs, prints, and exits without
+// the WER dialog that would otherwise block an unattended device run.
+static bool
+VaranTestFault(JSContext* cx, unsigned argc, Value* vp)
+{
+    fprintf(stderr, "varanTestFault: raising a deliberate null dereference NOW.\n");
+    fflush(stderr);
+    *(volatile int*)nullptr = 0;
+    return true;   // not reached
+}
+
 static const JSFunctionSpecWithHelp shell_functions[] = {
     JS_FN_HELP("version", Version, 0, 0,
 "version([number])",
@@ -6466,6 +6626,19 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
 "functions and their behavior are experimental: don't depend upon them\n"
 "unless you're willing to update your code if these experimental APIs change\n"
 "underneath you."),
+
+    // Varan (task #31): JIT-PC resolver diagnostics.
+    JS_FN_HELP("varanJitPcSelfTest", VaranJitPcSelfTest, 1, 0,
+"varanJitPcSelfTest(fn)",
+"  Verify the JIT-PC resolver against ground truth for fn's Baseline code: sweeps every\n"
+"  halfword, brackets each PCMappingIndexEntry, and requires two negative controls to fail\n"
+"  to resolve. Throws on any mismatch; returns the number of halfwords checked.\n"
+"  Requires --baseline-eager and that fn has already been called."),
+
+    JS_FN_HELP("varanTestFault", VaranTestFault, 0, 0,
+"varanTestFault()",
+"  Raise a deliberate null dereference to prove the device fault reporter fires and prints.\n"
+"  Terminates the process. Device diagnostics only."),
 
     JS_FS_HELP_END
 };
@@ -8209,9 +8382,55 @@ main(int argc, char** argv, char** envp)
     if (op.getBoolOption("no-threads"))
         js::DisableExtraThreads();
 
+    // Varan: the JIT fault reporter is now installed from JitRuntime::initialize
+    // (jit/VaranFaultReporter.cpp), shared with the browser -- the shell no longer installs its own.
+
+#if defined(XP_WIN)
+    // Varan: point ICU at the executable's own directory.
+    //
+    // ★ THIS HAS NOW COST TWO DEVICE TRIPS (M4.1 ctypes, and the first JIT smoke test), which is
+    // why it is finally a code fix rather than a runbook step. With MOZ_ICU_DATA_ARCHIVE the
+    // engine loads icudt*.dat at runtime, and the BROWSER works because XPCOMInit.cpp:692 calls
+    // u_setDataDirectory(greDir) before JS_Init. The standalone shell never did, so it depended
+    // on ICU's default search finding the file -- which happens when the shell is run from its
+    // own objdir (every host run) and does NOT happen when the shell is copied to a device
+    // folder. Result: `JS_Init FAILED: u_init() failed`, upstream of any JS, so a device trip
+    // measures nothing.
+    //
+    // Setting it to the exe's directory mirrors the browser exactly and makes the shell
+    // self-sufficient wherever it is copied, so the package can never again be one missing
+    // env var away from a wasted trip. An explicit ICU_DATA still wins if the user sets one:
+    // u_setDataDirectory only supplies the default search path.
+    {
+        wchar_t exePathW[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            // Strip the file name, keeping the trailing separator off.
+            for (DWORD i = n; i > 0; i--) {
+                if (exePathW[i - 1] == L'\\' || exePathW[i - 1] == L'/') {
+                    exePathW[i - 1] = L'\0';
+                    break;
+                }
+            }
+            char exePathA[MAX_PATH * 2];
+            int m = WideCharToMultiByte(CP_UTF8, 0, exePathW, -1, exePathA, sizeof(exePathA),
+                                        nullptr, nullptr);
+            if (m > 0)
+                u_setDataDirectory(exePathA);
+        }
+    }
+#endif
+
     // Start the engine.
-    if (!JS_Init())
+    // Varan (M4.1 DIAG): surface the JS_Init failure reason
+    // (e.g. "u_init() failed") instead of a silent `return 1`, so a device run
+    // pinpoints which init step fails on Windows RT. (JS_InitWithFailureDiagnostic
+    // returns nullptr on success, else the reason string.)
+    if (const char* jsInitFailure = JS_InitWithFailureDiagnostic()) {
+        fprintf(stderr, "JS_Init FAILED: %s\n", jsInitFailure);
+        fflush(stderr);
         return 1;
+    }
 
     if (!InitSharedArrayBufferMailbox())
         return 1;

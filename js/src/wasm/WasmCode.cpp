@@ -94,10 +94,45 @@ StaticallyLink(CodeSegment& cs, const LinkData& linkData, ExclusiveContext* cx)
     for (LinkData::InternalLink link : linkData.internalLinks) {
         uint8_t* patchAt = cs.base() + link.patchAtOffset;
         void* target = cs.base() + link.targetOffset;
-        if (link.isRawPointerPatch())
+        if (link.isRawPointerPatch()) {
+#if defined(VARAN_THUMB2)
+            // ★ B12 / D2-for-wasm: a jump-table entry is BRANCHED THROUGH, so it must carry the
+            // Thumb bit.
+            //
+            // The JS tier got this via Assembler::Bind (the D2 fix), but **wasm never goes through
+            // Assembler::processCodeLabels**: WasmGenerator.cpp:586-594 converts each CodeLabel into
+            // a LinkData::InternalLink applied HERE at module-link time, an entirely separate path.
+            // So D2's bit0 never ran for wasm tables and every entry stayed EVEN. The consumer is
+            // `ldr pc, [table + idx*4]` (BaseCompiler::tableSwitch), an interworking load: bit0 of
+            // the loaded word selects the instruction set, so an even entry drops the core into ARM
+            // state and executes Thumb halfwords as A32 -> 0xC000001D. On the simulator the B12
+            // guard catches it; ON DEVICE IT IS SILENT.
+            //
+            // SET, not mask: C7 direction (a synthesized code address about to be jumped through),
+            // the opposite of D1/D3 where an address is compared or subtracted.
+            //
+            // ⚠️ SCOPING, checked rather than assumed. WasmGenerator's comment says CodeLabels serve
+            // "switch cases and loads from floating-point / SIMD values in the constant pool" -- if
+            // the latter existed on ARM, OR-ing bit0 would corrupt a DATA pointer. It does not: on
+            // ARM, FP/SIMD constants go through the ARM constant pool (as_FImm64Pool/as_FImm32Pool),
+            // never a CodeLabel. Every addCodeLabel/writeCodePointer reachable on ARM is a
+            // jump-table entry (WasmBaselineCompile.cpp:2411-2413 jumpTable, and the JS tier's
+            // CodeGenerator-arm.cpp:1207). That clause is an x86-ism. If a DATA CodeLabel is ever
+            // introduced on ARM, this must become per-kind.
+            //
+            // ⚠️ We cannot test the Kind here: LinkData::InternalLink (WasmModule.h) does NOT store
+            // it -- the ctor only asserts it -- so there is no isCodeLabelPatch(). That is sound on
+            // ARM because the ONLY producer of a non-CodeLabel InternalLink is WasmGenerator.cpp:602
+            // (RawPointer, x86 global-data), which sits inside `#if defined(JS_CODEGEN_X86)` and is
+            // not compiled for us. So on ARM: isRawPointerPatch() => CodeLabel => jump-table entry.
+            // If a RawPointer link is ever emitted on ARM, InternalLink must gain a stored Kind and
+            // this must switch on it.
+            target = (void*)(uintptr_t(target) | 1);
+#endif
             *(void**)(patchAt) = target;
-        else
+        } else {
             Assembler::PatchInstructionImmediate(patchAt, PatchedImmPtr(target));
+        }
     }
 
     for (auto imm : MakeEnumeratedRange(SymbolicAddress::Limit)) {
@@ -620,6 +655,23 @@ const CallSite*
 Code::lookupCallSite(void* returnAddress) const
 {
     uint32_t target = ((uint8_t*)returnAddress) - segment_->base();
+#if defined(VARAN_THUMB2)
+    // ---- D1 (return-address class) ----
+    //
+    // `returnAddress` is a real Thumb-2 return address, so bit0 is SET (the instruction-set
+    // selector). The recorded callSite offsets are plain byte offsets, so the BinarySearch
+    // below -- an EXACT-match search -- misses every time, returns nullptr, and every caller
+    // asserts `callsite_`. 31 wasm/asm.js tests, the largest wasm residual.
+    //
+    // Fixed HERE, in the one exact-offset lookup, rather than at each caller or by masking the
+    // stored address: lookupCode() and lookupRange() take the same pointer and are RANGE
+    // lookups, so the +1 is harmless there and they work today. Masking the value earlier
+    // would be a wider change for no benefit; masking here fixes every caller at once and
+    // leaves the working paths untouched.
+    //
+    // MASK, not set: this address is being COMPARED, never branched through.
+    target &= ~uint32_t(1);
+#endif
     size_t lowerBound = 0;
     size_t upperBound = metadata_->callSites.length();
 

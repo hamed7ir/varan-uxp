@@ -10,6 +10,8 @@
 #include "libANGLE/renderer/d3d/d3d11/renderer11_utils.h"
 
 #include "common/debug.h"
+#include <cstdio>  // Varan (GPU diag): snprintf
+#include "common/VaranGpuLog.h"  // Varan (GPU diag): %TEMP%aran-gpu.log (no DebugView on RT)
 
 #include <initguid.h>
 
@@ -184,6 +186,14 @@ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
         IDXGISwapChain1 *swapChain1 = nullptr;
         HRESULT result = factory2->CreateSwapChainForHwnd(device, getNativeWindow(), &swapChainDesc,
                                                           nullptr, nullptr, &swapChain1);
+        // Varan (GPU diag): L3b -- DXGI 1.2 branch taken (CreateSwapChainForHwnd, SEQUENTIAL); HRESULT.
+        {
+            char varanGpuL3b[256];
+            snprintf(varanGpuL3b, sizeof(varanGpuL3b),
+                     "VARAN-GPU L3b: branch=CreateSwapChainForHwnd(SEQUENTIAL) hr=0x%08lX\n",
+                     static_cast<unsigned long>(result));
+            VaranGpuLog(varanGpuL3b);
+        }
         if (SUCCEEDED(result))
         {
             factory2->MakeWindowAssociation(getNativeWindow(), DXGI_MWA_NO_ALT_ENTER);
@@ -212,6 +222,14 @@ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
     swapChainDesc.SwapEffect         = DXGI_SWAP_EFFECT_DISCARD;
 
     HRESULT result = factory->CreateSwapChain(device, &swapChainDesc, swapChain);
+    // Varan (GPU diag): L3b -- legacy branch taken (CreateSwapChain, DISCARD); HRESULT.
+    {
+        char varanGpuL3c[256];
+        snprintf(varanGpuL3c, sizeof(varanGpuL3c),
+                 "VARAN-GPU L3b: branch=CreateSwapChain(DISCARD, legacy) hr=0x%08lX\n",
+                 static_cast<unsigned long>(result));
+        VaranGpuLog(varanGpuL3c);
+    }
     if (SUCCEEDED(result))
     {
         factory->MakeWindowAssociation(getNativeWindow(), DXGI_MWA_NO_ALT_ENTER);

@@ -1,0 +1,4 @@
+libffi vendored from upstream 3.4.6
+source: github.com/libffi/libffi releases v3.4.6
+tarball sha256: b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e
+vendored: 2026-07-17 (Varan M4.1; Windows-ARM32 backend sysv_msvc_arm32.S)

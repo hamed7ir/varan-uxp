@@ -19,3 +19,8 @@ SOURCES += [
 FINAL_LIBRARY = 'gkmedias'
 
 DEFINES['HAVE_EXPAT_CONFIG_H'] = True
+# Varan: define _CRT_RAND_S on the command line so <stdlib.h> declares rand_s()
+# regardless of include order. expat.h pulls <stdlib.h> before xmlparse.c's own late
+# `#define _CRT_RAND_S` (xmlparse.c:96), so the in-file predefine is a no-op -> clang-cl
+# promotes the missing rand_s prototype to a hard -Wimplicit-function-declaration error (:1186).
+DEFINES['_CRT_RAND_S'] = True

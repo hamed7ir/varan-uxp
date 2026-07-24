@@ -588,7 +588,16 @@ Instance::callExport(JSContext* cx, uint32_t funcIndex, CallArgs args)
         JitActivation jitActivation(cx, /* active */ false);
 
         // Call the per-exported-function trampoline created by GenerateEntry.
+        // Varan: a computed code address called directly from C++ -- same Thumb-bit
+        // requirement as JitCode::as<T>(). (wasm is a deferred tier, but the bit costs nothing and
+        // leaving it even would just reproduce the 0xC000001D fault when wasm is enabled.)
+#if defined(VARAN_THUMB2)
+        auto funcPtr = JS_DATA_TO_FUNC_PTR(ExportFuncPtr,
+            reinterpret_cast<uint8_t*>(
+                reinterpret_cast<uintptr_t>(codeBase() + func.entryOffset()) | 1));
+#else
         auto funcPtr = JS_DATA_TO_FUNC_PTR(ExportFuncPtr, codeBase() + func.entryOffset());
+#endif
         if (!CALL_GENERATED_2(funcPtr, exportArgs.begin(), &tlsData_))
             return false;
     }

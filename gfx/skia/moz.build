@@ -684,7 +684,10 @@ if CONFIG['GKMEDIAS_SHARED_LIBRARY']:
 
 # We should autogenerate these SSE related flags.
 
-if CONFIG['_MSC_VER']:
+# Varan: also gate on INTEL_ARCHITECTURE. clang-cl sets _MSC_VER
+# even on ARM, but the SSE opt sources above are only added under INTEL_ARCHITECTURE,
+# so on ARM this block would KeyError on files never added. (Mirrors line ~698.)
+if CONFIG['_MSC_VER'] and CONFIG['INTEL_ARCHITECTURE']:
     # MSVC doesn't need special compiler flags, but Skia needs to be told that these files should
     # be built with the required SSE level or it will simply compile in stubs and cause runtime crashes
     SOURCES['skia/src/opts/SkBitmapFilter_opts_SSE2.cpp'].flags += ['-DSK_CPU_SSE_LEVEL=20']
@@ -706,6 +709,19 @@ if CONFIG['INTEL_ARCHITECTURE'] and (CONFIG['GNU_CC'] or CONFIG['CLANG_CL']):
     SOURCES['skia/src/opts/SkOpts_avx.cpp'].flags += ['-mavx']
 elif CONFIG['CPU_ARCH'] == 'arm' and CONFIG['GNU_CC'] and CONFIG['BUILD_ARM_NEON']:
     DEFINES['SK_ARM_HAS_OPTIONAL_NEON'] = 1
+
+# Varan: on Win-ARM (clang-cl, GNU_CC='') skia compiles the portable
+# *_opts_none.cpp (the `else` of the SOURCES chain above) and does NOT set
+# SK_ARM_HAS_OPTIONAL_NEON, so its build system chose no-NEON. But SkPreConfig.h auto-defines
+# SK_ARM_HAS_NEON from the compiler's __ARM_NEON__/__ARM_NEON (clang-cl defines both for
+# thumbv7-...-msvc; Windows-on-ARM guarantees NEON), so the always-compiled core dispatch
+# (SkBitmapProcState.cpp, SkBlitter_RGB16.cpp, ...) references *_neon impls that were never
+# built -> link undefined. Undefine the NEON detection macros so skia's header agrees with the
+# build's no-NEON-opts choice (scalar dispatch). Same systemic cause as the libwebp dsp.h guard.
+# Perf debt owed to M3 (NEON via Thumb-2-safe intrinsics is a later lever, not an M2 blocker).
+if CONFIG['CPU_ARCH'] == 'arm' and not CONFIG['GNU_CC']:
+    CFLAGS += ['-U__ARM_NEON__', '-U__ARM_NEON']
+    CXXFLAGS += ['-U__ARM_NEON__', '-U__ARM_NEON']
 
 DEFINES['SKIA_IMPLEMENTATION'] = 1
 

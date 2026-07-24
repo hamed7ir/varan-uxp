@@ -114,7 +114,11 @@
     'disable_werror%': 0,
     'disable_altivec%': 0,
     'disable_crypto_vsx%': 0,
-    'disable_arm32_neon%': 0,
+    # Varan: default ARM32 NEON OFF. This tree's only arm (32-bit) target
+    # is Win-ARM, where gcm-arm32-neon.c (NEON intrinsics) crashes the LLVM ARM CodeView
+    # emitter under -Zi and conflicts with the tree-wide NEON-off stance. Sets
+    # NSS_DISABLE_ARM32_NEON -> AES-GCM uses the portable C path (freebl.gyp L533/L620).
+    'disable_arm32_neon%': 1,
     'mozilla_client%': 0,
     'comm_client%': 0,
     'moz_fold_libs%': 0,

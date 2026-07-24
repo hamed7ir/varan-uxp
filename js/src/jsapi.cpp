@@ -7171,7 +7171,18 @@ JS_GetGlobalJitCompilerOption(JSContext* cx, JSJitCompilerOption opt, uint32_t* 
 
 /************************************************************************/
 
-#if !defined(STATIC_EXPORTABLE_JS_API) && !defined(STATIC_JS_API) && defined(XP_WIN)
+// Varan: this DLL-only DllMain is DISABLED (#if 0). js is built as a static lib
+// (js_static) linked into xul.dll, which supplies the process DllMain (toolkit/library/nsDllMain.cpp).
+// Upstream excludes this no-op stub by defining STATIC_EXPORTABLE_JS_API / STATIC_JS_API, but
+// js/moz.configure sets STATIC_JS_API only off-WINNT (line ~73: `target.os != 'WINNT'`) and
+// STATIC_EXPORTABLE_JS_API isn't set for this config either — upstream always built SHARED JS on
+// Windows. The Varan `--disable-shared-js` change builds JS *static* on Windows, so neither macro
+// is defined, the original guard let this stub compile, and it collided ("duplicate symbol: DllMain")
+// with nsDllMain at the xul.dll link. This build never ships a standalone JS DLL. (Root fix would be
+// js/moz.configure defining STATIC_EXPORTABLE_JS_API for WINNT static-JS, but that forces a full js
+// recompile via js-confdefs.h; disabling here is functionally identical.) Original guard:
+//   #if !defined(STATIC_EXPORTABLE_JS_API) && !defined(STATIC_JS_API) && defined(XP_WIN)
+#if 0
 
 #include "jswin.h"
 

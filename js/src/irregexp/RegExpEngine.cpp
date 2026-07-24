@@ -1384,7 +1384,17 @@ irregexp::ExecuteCode(JSContext* cx, jit::JitCode* codeBlock, const CharT* chars
 
     InputOutputData data(chars, chars + length, start, matches, endIndex);
 
+    // Varan: same defect as JitCode::as<T>() -- this BYPASSES it by casting raw()
+    // directly, so it needs the Thumb bit for exactly the same reason: a C++ indirect call to an
+    // even address switches the core to ARM state. NOT hypothetical here -- native regexp is
+    // gated on the JIT being present (it was disabled while JS_CODEGEN_NONE), so turning the JIT
+    // on is what makes this site reachable for the first time.
+#if defined(VARAN_THUMB2)
+    RegExpCodeSignature function = reinterpret_cast<RegExpCodeSignature>(
+        reinterpret_cast<uintptr_t>(codeBlock->raw()) | 1);
+#else
     RegExpCodeSignature function = reinterpret_cast<RegExpCodeSignature>(codeBlock->raw());
+#endif
 
     {
         JS::AutoSuppressGCAnalysis nogc;

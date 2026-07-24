@@ -37,7 +37,11 @@ void SkTLS::PlatformSetSpecific(void* ptr) {
 
 // Call TLS destructors on thread exit. Code based on Chromium's
 // base/threading/thread_local_storage_win.cc
-#ifdef _WIN64
+// Varan: ARM32 Windows COFF does NOT prepend a leading underscore to C
+// symbols (like x64/ARM64, unlike x86-32). So the real symbols are `_tls_used` and
+// `skia_tls_callback` -- use the _WIN64-style (no extra underscore) names on _M_ARM, else
+// the x86 `#else` names (__tls_used / _skia_tls_callback) are forced and left undefined.
+#if defined(_WIN64) || defined(_M_ARM)
 
 #pragma comment(linker, "/INCLUDE:_tls_used")
 #pragma comment(linker, "/INCLUDE:skia_tls_callback")
@@ -61,7 +65,9 @@ void NTAPI onTLSCallback(PVOID unused, DWORD reason, PVOID unused2) {
 
 extern "C" {
 
-#ifdef _WIN64
+// Varan: route ARM32 to the const_seg form (like x64) to match the
+// no-underscore /INCLUDE above.
+#if defined(_WIN64) || defined(_M_ARM)
 
 #pragma const_seg(".CRT$XLB")
 extern const PIMAGE_TLS_CALLBACK skia_tls_callback;

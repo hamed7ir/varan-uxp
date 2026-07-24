@@ -174,7 +174,9 @@ class JitTest:
     @classmethod
     def find_directives(cls, file_name):
         meta = ''
-        line = open(file_name).readline()
+        # VARAN: explicit encoding — py3 text-open defaults to the Windows locale
+        # (cp1252) and a non-cp1252 byte in a test file crashes discovery for the whole run.
+        line = open(file_name, encoding='utf-8', errors='replace').readline()
         i = line.find(cls.COOKIE)
         if i != -1:
             meta = ';' + line[i + len(cls.COOKIE):].strip('\n')

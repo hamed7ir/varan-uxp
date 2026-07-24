@@ -96,7 +96,11 @@
 #define NS_IMETHODIMP_(type) type __stdcall
 #define NS_METHOD_(type) type __stdcall
 #define NS_CALLBACK_(_type, _name) _type (__stdcall * _name)
-#ifndef _WIN64
+// Varan: ARM (32- and 64-bit), like Win64, has a SINGLE calling
+// convention -- __stdcall is ignored by the compiler. Defining NS_HAVE_STDCALL there
+// makes the nsThreadUtils.h nsRunnableMethodTraits __stdcall specializations identical
+// to the default ones -> "redefinition" error. Exclude ARM as well as Win64.
+#if !defined(_WIN64) && !defined(_M_ARM) && !defined(_M_ARM64) && !defined(__arm__) && !defined(__aarch64__)
 // Win64 has only one calling convention.  __stdcall will be ignored by the compiler.
 #define NS_STDCALL __stdcall
 #define NS_HAVE_STDCALL

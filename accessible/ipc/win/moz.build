@@ -3,7 +3,12 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-if CONFIG['COMPILE_ENVIRONMENT']:
+# Varan: also gate the MIDL typelib on ACCESSIBILITY. It requires
+# MIDL + a cl.exe C preprocessor (we build with clang-cl -> "MIDL1005: cannot find
+# cl.exe"), and its ONLY consumer, PlatformChild.cpp, is itself ACCESSIBILITY-gated
+# below. COMPtrTypes.h (compiled even with a11y off) needs only <oleacc.h>, not the
+# typelib -- so with --disable-accessibility this is safely skipped.
+if CONFIG['COMPILE_ENVIRONMENT'] and CONFIG['ACCESSIBILITY']:
     DIRS += ['typelib']
 
 # With --disable-accessibility, we need to compile PDocAccessible.ipdl (which

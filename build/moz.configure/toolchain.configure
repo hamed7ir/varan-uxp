@@ -395,13 +395,14 @@ def check_compiler(compiler, language, target):
                 # We're on MSVC; enable C++17 language mode.
                 append_flag('-std:c++17')
 
-    # We force clang-cl to emulate Visual C++ 2015 Update 3 with fallback to
-    # cl.exe.
+    # We force clang-cl to emulate Visual C++ 2015 Update 3.
+    # ARM32/UWP BUILD spike (R3): -fallback is DELIBERATELY removed. At build scale a
+    # clang-cl compile failure that re-dispatches to cl.exe would emit wrong-arch
+    # (x64/host) objects into the ARM32 objdir and silently poison the link. We want
+    # clang-cl failures to be HARD failures, not silent cl.exe fallbacks.
     if info.type == 'clang-cl' and info.version != '19.00.24213':
-        # Those flags are direct clang-cl flags that don't need -Xclang, add
-        # them directly.
+        # Direct clang-cl flag (no -Xclang needed).
         flags.append('-fms-compatibility-version=19.00.24213')
-        flags.append('-fallback')
 
     # Check compiler target
     # --------------------------------------------------------------------

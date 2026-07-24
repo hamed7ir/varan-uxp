@@ -600,6 +600,13 @@ struct MessageWindow {
 
             // This is an incoming request.
             COPYDATASTRUCT *cds = (COPYDATASTRUCT*)lp;
+            // Varan (M4.1b): reject WM_COPYDATA whose buffer isn't
+            // NUL-terminated within cbData; the handler below scans lpData for a NUL
+            // without bounding by cbData, so a hostile local process could force an
+            // OOB read -> uncatchable AV (SEH off on thumbv7).
+            if (!cds || !cds->lpData || !cds->cbData ||
+                ((const char*)cds->lpData)[cds->cbData - 1] != '\0')
+                return FALSE;
 #if MOZ_DEBUG_DDE
             printf( "Incoming request: %s\n", (const char*)cds->lpData );
 #endif

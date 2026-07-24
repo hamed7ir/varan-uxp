@@ -2964,6 +2964,7 @@ UnsetPropertiesWithoutFlags(const nsStyleStructID aSID,
  * class, AutoCSSValueArray.
  */
 struct AutoCSSValueArray {
+#if !defined(_M_ARM)
   /**
    * aStorage must be the result of alloca(aCount * sizeof(nsCSSValue))
    */
@@ -2990,7 +2991,43 @@ struct AutoCSSValueArray {
 private:
   nsCSSValue *mArray;
   size_t mCount;
+#else
+  // Varan (M3 Finding B — clang-cl thumbv7 codegen BUG #5): a *dynamic*
+  // alloca in the caller forces the ARM backend to establish a base pointer (r6) atop the
+  // frame pointer (r11); a co-located stack aggregate whose address escapes (the nsRuleData
+  // |ruleData| below — &ruleData is passed to SetFont/MapRuleInfoInto) then has its frame
+  // index resolved via TWO bases 8 bytes apart (the pushed {r11,lr}) → &ruleData is 8 bytes
+  // wrong → SetFont reads mValueStorage from object+0x20 (garbage) → silent AV. Backing the
+  // storage with an inline-capacity AutoTArray removes the *dynamic alloca* from the caller
+  // (fixed-size inline buffer → no base pointer; heap spill only past the inline cap), which
+  // removes the codegen trigger while keeping the hot single-struct path allocation-free.
+  // N=64 ≥ the largest single style struct's longhand count (Display=49), so WalkRuleTree and
+  // SetGenericFont stay inline; the two multi-struct callers spill to heap. This is NOT a mask
+  // (no mValueOffsets reset) — it deletes the trigger. See CLANG-CL-THUMBV7-BUGS.md bug #5.
+  explicit AutoCSSValueArray(size_t aCount) {
+    // SetLength default-constructs aCount nsCSSValue() in place (== the placement-new above).
+    mArray.SetLength(aCount);
+  }
+
+  nsCSSValue* get() { return mArray.Elements(); }
+
+private:
+  AutoTArray<nsCSSValue, 64> mArray;
+#endif
 };
+
+// Varan (M3 Finding B — clang-cl thumbv7 codegen BUG #5): construct an
+// AutoCSSValueArray backing store WITHOUT a dynamic alloca on ARM. A dynamic alloca forces a
+// base pointer that miscompiles a co-located escaping &stack-aggregate (8-byte frame-index
+// split). On ARM the class owns an inline-capacity buffer (no alloca); elsewhere the historical
+// alloca fast-path is preserved byte-for-byte. See AutoCSSValueArray + CLANG-CL-THUMBV7-BUGS.md #5.
+#if defined(_M_ARM)
+#  define GOANNA_CSS_VALUE_ARRAY(arr_, count_) AutoCSSValueArray arr_(count_)
+#else
+#  define GOANNA_CSS_VALUE_ARRAY(arr_, count_)                                  \
+     void* arr_##Storage = alloca((count_) * sizeof(nsCSSValue));              \
+     AutoCSSValueArray arr_(arr_##Storage, count_)
+#endif
 
 /* static */ bool
 nsRuleNode::ResolveVariableReferences(const nsStyleStructID aSID,
@@ -3053,8 +3090,7 @@ nsRuleNode::WalkRuleTree(const nsStyleStructID aSID,
   // variable-sized stack array, including execution of constructors,
   // and use an RAII class to run the destructors too.
   size_t nprops = nsCSSProps::PropertyCountInStruct(aSID);
-  void* dataStorage = alloca(nprops * sizeof(nsCSSValue));
-  AutoCSSValueArray dataArray(dataStorage, nprops);
+  GOANNA_CSS_VALUE_ARRAY(dataArray, nprops);
 
   nsRuleData ruleData(nsCachedStyleData::GetBitForSID(aSID),
                       dataArray.get(), mPresContext, aContext);
@@ -4864,11 +4900,21 @@ nsRuleNode::SetGenericFont(nsPresContext* aPresContext,
   // variable-sized stack array, including execution of constructors,
   // and use an RAII class to run the destructors too.
   size_t nprops = nsCSSProps::PropertyCountInStruct(eStyleStruct_Font);
+#if !defined(_M_ARM)
+  // (ARM: no alloca — AutoCSSValueArray owns its storage; see bug #5 note on the class.)
   void* dataStorage = alloca(nprops * sizeof(nsCSSValue));
+#endif
 
   for (int32_t i = contextPath.Length() - 1; i >= 0; --i) {
     nsStyleContext* context = contextPath[i];
+#if defined(_M_ARM)
+    // Varan (bug #5): own the storage (no dynamic alloca → no base pointer → no
+    // 8-byte &ruleData split). Per-iteration construction reuses the same inline stack
+    // slot (Font's 27 props are within the N=64 inline cap → no heap). See bug #5 note.
+    AutoCSSValueArray dataArray(nprops);
+#else
     AutoCSSValueArray dataArray(dataStorage, nprops);
+#endif
 
     nsRuleData ruleData(NS_STYLE_INHERIT_BIT(Font), dataArray.get(),
                         aPresContext, context);
@@ -11353,8 +11399,7 @@ nsRuleNode::HasAuthorSpecifiedRules(nsStyleContext* aStyleContext,
     nprops += nsCSSProps::PropertyCountInStruct(eStyleStruct_Text);
   }
 
-  void* dataStorage = alloca(nprops * sizeof(nsCSSValue));
-  AutoCSSValueArray dataArray(dataStorage, nprops);
+  GOANNA_CSS_VALUE_ARRAY(dataArray, nprops);
 
   /* We're relying on the use of |aStyleContext| not mutating it! */
   nsRuleData ruleData(inheritBits, dataArray.get(),
@@ -11573,8 +11618,7 @@ nsRuleNode::ComputePropertiesOverridingAnimation(
     }
   }
 
-  void* dataStorage = alloca(nprops * sizeof(nsCSSValue));
-  AutoCSSValueArray dataArray(dataStorage, nprops);
+  GOANNA_CSS_VALUE_ARRAY(dataArray, nprops);
 
   // We're relying on the use of |aStyleContext| not mutating it!
   nsRuleData ruleData(structBits, dataArray.get(),

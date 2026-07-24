@@ -1013,6 +1013,25 @@ wasm::GenerateInterruptExit(MacroAssembler& masm, Label* throwLabel)
     // Store resumePC into the return PC stack slot.
     masm.loadWasmActivationFromSymbolicAddress(IntArgReg0);
     masm.loadPtr(Address(IntArgReg0, WasmActivation::offsetOfResumePC()), IntArgReg1);
+#if defined(VARAN_THUMB2)
+    // ★ Varan (C7 class -- SET, not MASK). This slot is consumed by masm.ret() below, which on ARM is
+    // ma_pop(pc): a LOAD INTO PC, i.e. a real interworking branch whose bit0 selects the instruction
+    // set. resumePC_ comes from the OS thread context (WasmSignalHandlers.cpp: *ContextToPC(context),
+    // and on Windows ARM32 `R15_sig(p) == (p)->Pc`), and **CONTEXT.Pc does NOT carry the Thumb bit --
+    // Thumb state lives in Cpsr bit 5**. So the value loaded here is EVEN, and resuming an interrupted
+    // Thumb-2 wasm/asm.js frame through it drops the CPU into ARM state: Thumb halfwords get decoded
+    // as A32 -> 0xC000001D. OR in bit0, exactly as MacroAssembler::call(Register) does before as_blx.
+    //
+    // ⚠️ Trigger is MORE likely on the target, not less: it needs a cross-thread interrupt while the
+    // PC is inside wasm code (the slow-script / GC watchdog race), and a Tegra 3 hits the slow-script
+    // watchdog far more often than a desktop does.
+    //
+    // ⚠️ Why this was invisible until now: this stub used to abort at emit time on unimplemented
+    // opcodes (emitUdf). Closing that UDF coverage made it emit FULLY and SILENTLY, removing the loud
+    // guard that had been accidentally protecting us -- a latent device-lethal path where there used
+    // to be a compile-time stop. Same shape as the AtomicOperations JS_CODEGEN_NONE gap.
+    masm.as_orr(IntArgReg1, IntArgReg1, Imm8(1));
+#endif
     masm.storePtr(IntArgReg1, Address(r6, 14 * sizeof(uint32_t*)));
 
     // Save all FP registers

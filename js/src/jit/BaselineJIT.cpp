@@ -754,7 +754,14 @@ BaselineScript::icEntryFromReturnAddress(uint8_t* returnAddr)
 {
     MOZ_ASSERT(returnAddr > method_->raw());
     MOZ_ASSERT(returnAddr < method_->raw() + method_->instructionsSize());
+#if defined(VARAN_THUMB2)
+    // Thumb return addresses (produced by blx) carry the interworking (Thumb) bit in bit0,
+    // whereas recorded ICEntry returnOffsets are plain even code offsets. Mask bit0 so the
+    // odd return address does not miss every entry in the binary search.
+    CodeOffset offset((returnAddr - method_->raw()) & ~size_t(1));
+#else
     CodeOffset offset(returnAddr - method_->raw());
+#endif
     return icEntryFromReturnOffset(offset);
 }
 

@@ -11,6 +11,8 @@
 #include <EGL/eglext.h>
 #include <iomanip>
 #include <sstream>
+#include <cstdio>  // Varan (GPU diag): snprintf
+#include "common/VaranGpuLog.h"  // Varan (GPU diag): %TEMP%aran-gpu.log (no DebugView on RT)
 #include <versionhelpers.h>
 
 #include "common/tls.h"
@@ -479,9 +481,29 @@ Renderer11::Renderer11(egl::Display *display)
             }
         }
 
-        if (requestedMajorVersion == 9 && requestedMinorVersion == 3)
+        // Varan (M5 GPU, 2026-07-23): Surface RT / Tegra 3 is a DX9-class GPU that only
+        // exposes D3D feature level 9_1 (Tegra 4 = 9_3). Upstream ANGLE offered 9_3 ONLY on an
+        // explicit (major==9,minor==3) request, so on the browser's default EGL_DONT_CARE path
+        // the array floored at 10_0 -> D3D11CreateDevice returned DXGI_ERROR_UNSUPPORTED (device
+        // never created, WebGL dead; confirmed on device via VARAN-GPU L2). Push 9_3/9_2/9_1 in
+        // DESCENDING order (mirrors the 10_x block above) so the runtime negotiates the HIGHEST
+        // level the hardware actually supports -- self-adapts across 9_1..9_3. FL9_1 is fully
+        // handled by the D3D11 backend (renderer11_utils.cpp caps tables); only cost is coarser
+        // caps + a telemetry histogram bucket. On DONT_CARE (the browser) all three are pushed.
+        if (requestedMajorVersion == EGL_DONT_CARE || requestedMajorVersion >= 9)
         {
-            mAvailableFeatureLevels.push_back(D3D_FEATURE_LEVEL_9_3);
+            if (requestedMinorVersion == EGL_DONT_CARE || requestedMinorVersion >= 3)
+            {
+                mAvailableFeatureLevels.push_back(D3D_FEATURE_LEVEL_9_3);
+            }
+            if (requestedMinorVersion == EGL_DONT_CARE || requestedMinorVersion >= 2)
+            {
+                mAvailableFeatureLevels.push_back(D3D_FEATURE_LEVEL_9_2);
+            }
+            if (requestedMinorVersion == EGL_DONT_CARE || requestedMinorVersion >= 1)
+            {
+                mAvailableFeatureLevels.push_back(D3D_FEATURE_LEVEL_9_1);
+            }
         }
 
         EGLint requestedDeviceType = static_cast<EGLint>(attributes.get(
@@ -660,6 +682,16 @@ egl::Error Renderer11::initialize()
         memset(mDescription, 0, sizeof(mDescription));
         wcstombs(mDescription, mAdapterDescription.Description, sizeof(mDescription) - 1);
 
+        // Varan (GPU diag): L1 -- renderer string + negotiated D3D feature level (release-unconditional).
+        {
+            char varanGpuL1[512];
+            snprintf(varanGpuL1, sizeof(varanGpuL1),
+                     "VARAN-GPU L1: renderer=\"%s\" featureLevel=0x%04X\n",
+                     mDescription,
+                     static_cast<unsigned int>(mRenderer11DeviceCaps.featureLevel));
+            VaranGpuLog(varanGpuL1);
+        }
+
         result = mDxgiAdapter->GetParent(__uuidof(IDXGIFactory), (void**)&mDxgiFactory);
 
         if (!mDxgiFactory || FAILED(result))
@@ -768,6 +800,15 @@ egl::Error Renderer11::initializeD3DDevice()
             {
                 ANGLE_HISTOGRAM_SPARSE_SLOWLY("GPU.ANGLE.D3D11CreateDeviceError",
                                               static_cast<int>(result));
+                // Varan (GPU diag): L2 -- D3D11CreateDevice failure HRESULT (release-unconditional).
+                {
+                    char varanGpuL2[256];
+                    snprintf(varanGpuL2, sizeof(varanGpuL2),
+                             "VARAN-GPU L2: D3D11CreateDevice FAILED hr=0x%08lX "
+                             "(EGL_NOT_INITIALIZED / D3D11_INIT_CREATEDEVICE_ERROR)\n",
+                             static_cast<unsigned long>(result));
+                    VaranGpuLog(varanGpuL2);
+                }
                 return egl::Error(EGL_NOT_INITIALIZED, D3D11_INIT_CREATEDEVICE_ERROR,
                                   "Could not create D3D11 device.");
             }

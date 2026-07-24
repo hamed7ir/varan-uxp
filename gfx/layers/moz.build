@@ -71,6 +71,22 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
         UNIFIED_SOURCES += [            'd3d11/TextureD3D11.cpp',
         ]
 
+    # Varan (M5 Lever D): restore the D3D9 compositor (revert Issue #1841 Part 3).
+    # VARAN-TEMP: Phase-1 compile probe gates on the enclosing WINNT block only; the proper
+    # CONFIG['MOZ_ENABLE_D3D9_LAYER'] gate is restored in Phase 2/3. Non-unified to isolate errors.
+    EXPORTS += [
+        'd3d9/DeviceManagerD3D9.h',
+    ]
+    EXPORTS.mozilla.layers += [
+        'd3d9/CompositorD3D9.h',
+        'd3d9/TextureD3D9.h',
+    ]
+    SOURCES += [
+        'd3d9/CompositorD3D9.cpp',
+        'd3d9/DeviceManagerD3D9.cpp',
+        'd3d9/TextureD3D9.cpp',
+    ]
+
 EXPORTS.gfxipc += [
     'ipc/ShadowLayerUtils.h',
 ]

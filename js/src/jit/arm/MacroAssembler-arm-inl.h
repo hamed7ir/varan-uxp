@@ -834,6 +834,19 @@ MacroAssembler::rotateLeft(Register count, Register input, Register dest)
 void
 MacroAssembler::rotateLeft64(Imm32 count, Register64 input, Register64 dest, Register temp)
 {
+    // Varan (analysed 2026-07-23): this assertion fires in debug builds (11 hits on Thumb-2, 14 on
+    // the A32 control -> PRE-EXISTING upstream, not a Thumb-2 regression). Classified COSMETIC, do
+    // NOT re-litigate: in BOTH constant-count rotate64 variants `temp` is never read and never
+    // written -- it is only forwarded between rotateLeft64(Imm32) and rotateRight64(Imm32), whose
+    // mutual recursion is bounded (amount>32 -> 64-amount<32 -> the else branch) and never reaches
+    // the Register-count variants, which are the ones that genuinely use temp (see :864 / :954,
+    // which assert temp != InvalidReg and then ma_mov(src.high, temp)). Both Imm32 paths take their
+    // scratch from ScratchRegisterScope, not temp. So on an OPT build -- where this MOZ_ASSERT does
+    // not exist -- the emitted code is identical no matter what temp holds: no clobber of a live
+    // register, no use of an undefined one. A caller that supplies a temp here merely wastes a
+    // register allocation. (LIRGeneratorARM::lowerForShiftInt64, Lowering-arm.cpp:303, allocates the
+    // temp only when the count is non-constant, i.e. exactly for the Register variants; the firing
+    // means some case disagrees about constant-ness between MIR and LIR. NOT chased: harmless.)
     MOZ_ASSERT(temp == InvalidReg);
     MOZ_ASSERT(input.low != dest.high && input.high != dest.low);
 
@@ -2135,6 +2148,23 @@ void
 MacroAssembler::wasmPatchBoundsCheck(uint8_t* patchAt, uint32_t limit)
 {
     Instruction* inst = (Instruction*) patchAt;
+#if defined(VARAN_THUMB2)
+    // The bounds-check placeholder is a T2 cmp.w r_index,#0 (SUB, S, Rd=PC; emitted by as_cmp -> the
+    // as_alu modimm seam). Read the index register out of hw0, then rewrite the imm8 field in place to
+    // #limit. This is the ALU-imm imm-FIELD patch slot P2's read-back map omitted -- do NOT use the
+    // A32 InstCMP/InstALU decoders (they reject a T2 cmp.w). MOZ_RELEASE_ASSERT is the T2 predicate on
+    // the runtime heap limit (a release crash if it is not modified-immediate-encodable, as in A32).
+    uint32_t hw0 = inst->encode() & 0xffffu;
+    MOZ_RELEASE_ASSERT((hw0 & 0xfbf0u) == 0xf1b0u);   // T2 cmp.w r_index,#imm sanity (0xF000|SUB<<5|S<<4)
+    uint32_t index = hw0 & 0xf;
+    int32_t control = js::jit::ThumbModImmControl(limit);
+    MOZ_RELEASE_ASSERT(control >= 0);
+    uint32_t i = (uint32_t(control) >> 11) & 1, imm3 = (uint32_t(control) >> 8) & 7, imm8 = control & 0xff;
+    uint32_t nhw0 = 0xf000u | (i << 10) | (0xdu << 5) | (1u << 4) | index;   // cmp.w = SUB,S,Rd=PC
+    uint32_t nhw1 = (imm3 << 12) | (0xfu << 8) | imm8;
+    inst->varanSetRaw((nhw1 << 16) | nhw0);
+    // Don't call Auto Flush Cache; the wasm caller has done this for us.
+#else
     MOZ_ASSERT(inst->is<InstCMP>());
     InstCMP* cmp = inst->as<InstCMP>();
 
@@ -2148,6 +2178,7 @@ MacroAssembler::wasmPatchBoundsCheck(uint8_t* patchAt, uint32_t limit)
 
     *inst = InstALU(InvalidReg, index, imm8, OpCmp, SetCC, Always);
     // Don't call Auto Flush Cache; the wasm caller has done this for us.
+#endif
 }
 
 //}}} check_macroassembler_style

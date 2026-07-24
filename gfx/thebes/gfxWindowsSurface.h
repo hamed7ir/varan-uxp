@@ -26,6 +26,8 @@ public:
     };
 
     gfxWindowsSurface(HDC dc, uint32_t flags = 0);
+    // Varan (M5 Lever D): restore the D3D9-surface ctor (revert Issue #1841 Part 2).
+    gfxWindowsSurface(IDirect3DSurface9 *surface, uint32_t flags = 0);
 
     // Create a DIB surface
     gfxWindowsSurface(const mozilla::gfx::IntSize& size,

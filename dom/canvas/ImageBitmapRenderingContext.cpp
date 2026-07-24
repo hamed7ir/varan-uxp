@@ -155,6 +155,11 @@ ImageBitmapRenderingContext::GetImageBuffer(int32_t* aFormat)
   }
 
   RefPtr<SourceSurface> surface = mImage->GetAsSourceSurface();
+  // Varan (M4.1b): GetAsSourceSurface() can return null (alloc/map
+  // failure); the if(!data) below guards GetDataSurface's result, not surface itself.
+  if (NS_WARN_IF(!surface)) {
+    return nullptr;
+  }
   RefPtr<DataSourceSurface> data = surface->GetDataSurface();
   if (!data) {
     return nullptr;

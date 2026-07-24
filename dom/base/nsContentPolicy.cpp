@@ -139,10 +139,31 @@ nsContentPolicy::CheckPolicy(CPMethod          policyMethod,
         if (mixedContentBlocker == entries[i] || cspService == entries[i]) {
           type = contentType;
         }
+#if defined(_M_ARM)
+        // Varan (M3): dispatch the VIRTUAL nsIContentPolicy method
+        // DIRECTLY. Calling it through the runtime pointer-to-member `policyMethod`
+        // routes through clang-cl's miscompiled ??_9nsIContentPolicy@@$B..@AA vcall
+        // thunk (`ldr r1,[r0]; ...; bx r1`), which clobbers r1 = arg1 = contentType,
+        // silently corrupting CSP / mixed-content decisions on every subresource
+        // load. policyMethod is one of &ShouldLoad/&ShouldProcess (CheckPolicy's only
+        // two callers); comparing the PMF does NOT invoke the thunk. An ordinary
+        // virtual call resolves the fn into a non-arg scratch (arg1 preserved). See
+        // VARAN-M3-VPMF-BLAST.md. Belt-and-suspenders with the link-time thunk
+        // override; a live security fix before that lands.
+        if (policyMethod == static_cast<CPMethod>(&nsIContentPolicy::ShouldProcess))
+          rv = entries[i]->ShouldProcess(type, contentLocation, requestingLocation,
+                                         requestingContext, mimeType, extra,
+                                         requestPrincipal, decision);
+        else
+          rv = entries[i]->ShouldLoad(type, contentLocation, requestingLocation,
+                                      requestingContext, mimeType, extra,
+                                      requestPrincipal, decision);
+#else
         rv = (entries[i]->*policyMethod)(type, contentLocation,
                                          requestingLocation, requestingContext,
                                          mimeType, extra, requestPrincipal,
                                          decision);
+#endif
 
         if (NS_SUCCEEDED(rv) && NS_CP_REJECTED(*decision)) {
             // If we are blocking an image, we have to let the
@@ -196,11 +217,28 @@ nsContentPolicy::CheckPolicy(CPMethod          policyMethod,
     count = simpleEntries.Count();
     for (int32_t i = 0; i < count; i++) {
         /* check the appropriate policy */
+#if defined(_M_ARM)
+        // Varan (M3): direct virtual dispatch — see the parallel
+        // block above (nsIContentPolicy). simplePolicyMethod is one of
+        // &nsISimpleContentPolicy::ShouldLoad/ShouldProcess.
+        if (simplePolicyMethod ==
+            static_cast<SCPMethod>(&nsISimpleContentPolicy::ShouldProcess))
+          rv = simpleEntries[i]->ShouldProcess(externalType, contentLocation,
+                                               requestingLocation, topFrameElement,
+                                               isTopLevel, mimeType, extra,
+                                               requestPrincipal, decision);
+        else
+          rv = simpleEntries[i]->ShouldLoad(externalType, contentLocation,
+                                            requestingLocation, topFrameElement,
+                                            isTopLevel, mimeType, extra,
+                                            requestPrincipal, decision);
+#else
         rv = (simpleEntries[i]->*simplePolicyMethod)(externalType, contentLocation,
                                                      requestingLocation,
                                                      topFrameElement, isTopLevel,
                                                      mimeType, extra, requestPrincipal,
                                                      decision);
+#endif
 
         if (NS_SUCCEEDED(rv) && NS_CP_REJECTED(*decision)) {
             // If we are blocking an image, we have to let the

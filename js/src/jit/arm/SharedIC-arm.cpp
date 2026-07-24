@@ -202,11 +202,23 @@ ICUnaryArith_Int32::Compiler::generateStubCode(MacroAssembler& masm)
         masm.as_rsb(R0.payloadReg(), R0.payloadReg(), Imm8(0));
         break;
       case JSOP_INC: {
+        // Varan: upstream emits no overflow check here at all
+        // (inc32() is a bare add32(Imm32(1))), so INT32_MAX++ wrapped to INT32_MIN
+        // instead of producing the double 2147483648. Guard like JSOP_NEG above.
+        //
+        // The guard must come BEFORE the add: EmitStubGuardFailure() falls through
+        // to the next stub / the fallback, both of which re-read the operand out of
+        // R0, so R0 must still hold the untouched input on the failure path.
+        masm.branch32(Assembler::Equal, R0.payloadReg(), Imm32(INT32_MAX), &failure);
+
         RegisterOrInt32Constant rval = RegisterOrInt32Constant(R0.payloadReg());
         masm.inc32(&rval);
         break;
       }
       case JSOP_DEC: {
+        // Varan: see JSOP_INC. INT32_MIN-- wrapped to INT32_MAX.
+        masm.branch32(Assembler::Equal, R0.payloadReg(), Imm32(INT32_MIN), &failure);
+
         RegisterOrInt32Constant rval = RegisterOrInt32Constant(R0.payloadReg());
         masm.dec32(&rval);
         break;

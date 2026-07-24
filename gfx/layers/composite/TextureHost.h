@@ -46,6 +46,7 @@ class CompositorBridgeParent;
 class SurfaceDescriptor;
 class HostIPCAllocator;
 class ISurfaceAllocator;
+class TextureSourceD3D9; // Varan (M5 Lever D): restore D3D9 texture-source fwd-decl (revert Issue #1841 Part 3)
 class TextureHostOGL;
 class TextureReadLock;
 class TextureSourceOGL;
@@ -121,6 +122,7 @@ public:
   }
   virtual TextureSourceD3D11* AsSourceD3D11() { return nullptr; }
   virtual TextureSourceBasic* AsSourceBasic() { return nullptr; }
+  virtual TextureSourceD3D9* AsSourceD3D9() { return nullptr; } // Varan (M5 Lever D): revert Issue #1841 Part 3
   /**
    * Cast to a DataTextureSurce.
    */

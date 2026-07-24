@@ -1167,9 +1167,36 @@ CodeGeneratorARM::emitTableSwitchDispatch(MTableSwitch* mir, Register index, Reg
     // Inhibit pools within the following sequence because we are indexing into
     // a pc relative table. The region will have one instruction for ma_ldr, one
     // for ma_b, and each table case takes one word.
+#if defined(VARAN_THUMB2)
+    // ---- emitTableSwitchDispatch, reshaped for T32 ----
+    //
+    // The A32 form is `ldr pc, [pc, index lsl 2]`, which is illegal here twice over: Rn == PC
+    // with a REGISTER offset has no T32 encoding at all (PC-relative loads are the literal form
+    // with an immediate; our emit guard 0x512 rejects it), and it leans on the A32 pc-read being
+    // insn+8 -- the reason the A32 comment above describes an "empty word after the branch".
+    //
+    // Reshaped: compute the table base explicitly with ADR (a legal T32 PC read, Align(PC,4)+imm)
+    // and index off THAT register. `ldr.w pc, [Rn, Rm, lsl #2]` is a legal T32 interworking
+    // branch as long as Rn != PC, which is now true.
+    //
+    // The out-of-range test is also INVERTED into a real conditional branch taken FIRST, instead
+    // of a conditional load. That removes the branch-over the conditional load would otherwise
+    // need -- and a branch-over here would have shifted the table relative to the ADR, which is
+    // exactly the kind of layout coupling that goes silently wrong.
+    //
+    //   O+0:  b<Signed> defaultcase      out of range -> default
+    //   O+4:  adr   scratch, #4          scratch = Align(O+8,4) + 4 = O+12 = the table start
+    //   O+8:  ldr.w pc, [scratch, index, lsl #2]
+    //   O+12: <table entries, one word per case>
+    masm.ma_b(defaultcase, Assembler::Signed);
+    VaranForbidPoolsIfOutermost afp(&masm, 2 + cases);
+    masm.as_adr(scratch, 4);
+    masm.ma_ldr(DTRAddr(scratch, DtrRegImmShift(index, LSL, 2)), pc, Offset, Assembler::Always);
+#else
     AutoForbidPools afp(&masm, 1 + 1 + cases);
     masm.ma_ldr(DTRAddr(pc, DtrRegImmShift(index, LSL, 2)), pc, Offset, Assembler::NotSigned);
     masm.ma_b(defaultcase);
+#endif
 
     // To fill in the CodeLabels for the case entries, we need to first generate
     // the case entries (we don't yet know their offsets in the instruction

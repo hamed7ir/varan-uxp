@@ -125,7 +125,11 @@ Atomic32 Release_CompareAndSwap(volatile Atomic32* ptr,
                                 Atomic32 old_value,
                                 Atomic32 new_value);
 
-#if defined(__MINGW32__) && defined(MemoryBarrier)
+// Varan: the Windows SDK winnt.h defines MemoryBarrier() as a macro
+// (on ARM: __dmb(_ARM_BARRIER_SY)). It eats protobuf's own `void MemoryBarrier()`
+// declaration here and the generic_gcc.h definition (included below) -> "variable has
+// incomplete type 'void'". Undef whenever the macro is present, not only under MinGW.
+#if defined(MemoryBarrier)
 #undef MemoryBarrier
 #endif
 void MemoryBarrier();
@@ -175,6 +179,11 @@ Atomic64 Release_Load(volatile const Atomic64* ptr);
 #elif defined(_MSC_VER)
 #if defined(GOOGLE_PROTOBUF_ARCH_IA32) || defined(GOOGLE_PROTOBUF_ARCH_X64)
 #include <google/protobuf/stubs/atomicops_internals_x86_msvc.h>
+#elif defined(__clang__) && __has_extension(c_atomic)
+// Varan: clang-cl on ARM (MSVC mode, non-x86) has no MSVC atomics
+// header here; use clang's C11 __atomic builtins via the generic_gcc impl, exactly
+// as the plain-clang branch below does.
+#include <google/protobuf/stubs/atomicops_internals_generic_gcc.h>
 #else
 GOOGLE_PROTOBUF_ATOMICOPS_ERROR
 #endif

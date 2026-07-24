@@ -25,6 +25,13 @@
 
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/Unused.h"
+#include "mozilla/Logging.h"  // Varan (M3): GetManifestURI/ResolveURI probe
+
+// Varan (M3): probe module for the chrome-manifest base-URI
+// startup crash (nsIOService::NewURI AV with a garbage aBaseURI). Emits at
+// LogLevel::Error so it always prints when the module is enabled
+// (MOZ_LOG=GoannaCR:5). Remove once (A)/(B)/(C) is settled.
+static mozilla::LazyLogModule sGoannaCRLog("GoannaCR");
 
 #include "nsICommandLine.h"
 #include "nsILocaleService.h"
@@ -673,10 +680,23 @@ nsChromeRegistryChrome::GetXULOverlays(nsIURI *aChromeURL,
 nsIURI*
 nsChromeRegistry::ManifestProcessingContext::GetManifestURI()
 {
+  // Varan (M3) probe: log mManifestURI's raw value ON ENTRY,
+  // BEFORE the if() — this is the (A)-vs-(B/C) discriminator. With the ctor
+  // explicit-init in place, this must read null on first entry; a garbage value
+  // here means the explicit-init did not take (deeper ctor codegen defect).
+  MOZ_LOG(sGoannaCRLog, mozilla::LogLevel::Error,
+          ("GoannaCR GetManifestURI ENTRY this=%p mManifestURI(raw)=%p",
+           (void*)this, (void*)mManifestURI.get()));
   if (!mManifestURI) {
     nsCString uri;
     mFile.GetURIString(uri);
+    MOZ_LOG(sGoannaCRLog, mozilla::LogLevel::Error,
+            ("GoannaCR GetManifestURI CREATE len=%d uriString=[%s]",
+             (int)uri.Length(), uri.get()));
     NS_NewURI(getter_AddRefs(mManifestURI), uri);
+    MOZ_LOG(sGoannaCRLog, mozilla::LogLevel::Error,
+            ("GoannaCR GetManifestURI CREATED mManifestURI=%p",
+             (void*)mManifestURI.get()));
   }
   return mManifestURI;
 }
@@ -694,6 +714,11 @@ already_AddRefed<nsIURI>
 nsChromeRegistry::ManifestProcessingContext::ResolveURI(const char* uri)
 {
   nsIURI* baseuri = GetManifestURI();
+  // Varan (M3) probe: baseuri is what reaches NewURI as aBaseURI
+  // (the wild 0x9F5A00E9 on device). Log it immediately before NS_NewURI(:701).
+  MOZ_LOG(sGoannaCRLog, mozilla::LogLevel::Error,
+          ("GoannaCR ResolveURI uri=[%s] baseuri=%p",
+           uri ? uri : "(null)", (void*)baseuri));
   if (!baseuri)
     return nullptr;
 

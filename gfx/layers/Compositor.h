@@ -128,6 +128,7 @@ class Layer;
 class TextureSource;
 class DataTextureSource;
 class CompositingRenderTarget;
+class CompositorD3D9; // Varan (M5 Lever D): restore D3D9 compositor fwd-decl (revert Issue #1841 Part 3)
 class CompositorBridgeParent;
 class LayerManagerComposite;
 class CompositorOGL;
@@ -476,6 +477,7 @@ public:
   virtual CompositorOGL* AsCompositorOGL() { return nullptr; }
   virtual CompositorD3D11* AsCompositorD3D11() { return nullptr; }
   virtual BasicCompositor* AsBasicCompositor() { return nullptr; }
+  virtual CompositorD3D9* AsCompositorD3D9() { return nullptr; } // Varan (M5 Lever D): revert Issue #1841 Part 3
 
   /**
    * Each Compositor has a unique ID.

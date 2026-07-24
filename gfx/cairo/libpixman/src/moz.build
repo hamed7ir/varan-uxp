@@ -96,9 +96,15 @@ elif 'ppc' in CONFIG['OS_TEST']:
 # viable solution in the future.
 elif 'arm' in CONFIG['OS_TEST']:
     if CONFIG['OS_ARCH'] != 'Darwin':
-        if CONFIG['HAVE_ARM_SIMD']:
+        # Varan: the arm-simd/neon *C* files (pixman-arm-simd.c/pixman-arm-neon.c)
+        # are pure glue that BIND to the GNU-assembler .S impls (pixman-arm-simd-asm.S etc.), which
+        # only compile under GNU_CC (see the .S gate at the top of this file). clang-cl on Win-ARM
+        # sets HAVE_ARM_SIMD but GNU_CC='' -> the .c compiled and referenced pixman_composite_*_asm_armv6
+        # with no impl -> link undefined. Gate the C glue on GNU_CC too so NEON-off Win-ARM (dialect:
+        # the .S is A32 anyway) falls to the portable C fast paths (pixman-fast-path.c, always built).
+        if CONFIG['HAVE_ARM_SIMD'] and CONFIG['GNU_CC']:
             use_arm_simd_gcc = True
-        if CONFIG['HAVE_ARM_NEON']:
+        if CONFIG['HAVE_ARM_NEON'] and CONFIG['GNU_CC']:
             use_arm_neon_gcc = True
 
 if use_mmx:

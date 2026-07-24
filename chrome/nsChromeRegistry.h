@@ -105,6 +105,13 @@ public:
     ManifestProcessingContext(NSLocationType aType, mozilla::FileLocation &aFile)
       : mType(aType)
       , mFile(aFile)
+      // Varan (M3): explicitly null-init the trailing nsCOMPtr
+      // members. Hypothesis (A2): on clang-cl thumbv7 the nsCOMPtr default ctor
+      // was elided for these stack members, leaving mManifestURI as garbage so
+      // GetManifestURI()'s `if(!mManifestURI)` skips lazy creation and returns
+      // the garbage as the base URI (device crash: nsIOService::NewURI AV).
+      , mManifestURI(nullptr)
+      , mXPConnect(nullptr)
     { }
 
     ~ManifestProcessingContext()

@@ -678,8 +678,17 @@ UnboxedPlainObject::createWithProperties(ExclusiveContext* cx, HandleObjectGroup
         MOZ_ASSERT(cx->isJSContext());
 
         typedef JSObject* (*ConstructorCodeSignature)(IdValuePair*, NewObjectKind);
+        // Varan: bypasses JitCode::as<T>() by casting raw() directly, so it needs
+        // the Thumb bit for the same reason -- a C++ indirect call to an even address switches
+        // the core to ARM state (device 0xC000001D).
+#if defined(VARAN_THUMB2)
+        ConstructorCodeSignature function =
+            reinterpret_cast<ConstructorCodeSignature>(
+                reinterpret_cast<uintptr_t>(layout.constructorCode()->raw()) | 1);
+#else
         ConstructorCodeSignature function =
             reinterpret_cast<ConstructorCodeSignature>(layout.constructorCode()->raw());
+#endif
 
         JSObject* obj;
         {

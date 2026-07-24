@@ -344,6 +344,12 @@ class Simulator
 
     // Executes one instruction.
     void instructionDecode(SimInstruction* instr);
+#if defined(VARAN_THUMB2)
+    // VARAN Phase 1: decode+execute one Thumb-2 instruction (the encoder emits only Thumb-2).
+    // Scoped to what the encoder currently produces; grows in lockstep with the encoder.
+    void varanThumb2Decode(SimInstruction* instr);
+    void varanCheckInterworkTarget(int32_t target, const char* site);
+#endif
 
   public:
     static bool ICacheCheckingEnabled;

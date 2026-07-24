@@ -75,6 +75,12 @@ class AutoSetHandlingSegFault
 #if !(defined(XP_DARWIN) && defined(__ppc__))
 
 #if defined(XP_WIN)
+# if defined(_M_ARM)
+// Varan M1: ARM Windows CONTEXT has Pc/Sp/R0-R12/Lr, not the x86 Eip/Rip/R*.
+// ARM32 compiles only the non-WASM_HUGE_MEMORY path (stub HandleMemoryAccess), so the
+// wasm fault handler's only CONTEXT access is ContextToPC -> PC_sig -> R15_sig (PC).
+#  define R15_sig(p) ((p)->Pc)
+# else
 # define XMM_sig(p,i) ((p)->Xmm##i)
 # define EIP_sig(p) ((p)->Eip)
 # define RIP_sig(p) ((p)->Rip)
@@ -94,6 +100,7 @@ class AutoSetHandlingSegFault
 # define R13_sig(p) ((p)->R13)
 # define R14_sig(p) ((p)->R14)
 # define R15_sig(p) ((p)->R15)
+# endif
 #elif defined(__OpenBSD__)
 # define XMM_sig(p,i) ((p)->sc_fpstate->fx_xmm[i])
 # define EIP_sig(p) ((p)->sc_eip)
@@ -1289,8 +1296,19 @@ ProcessHasSignalHandlers()
     // Install a SIGSEGV handler to handle safely-out-of-bounds asm.js heap
     // access and/or unaligned accesses.
 # if defined(XP_WIN)
+#  if !defined(JS_CODEGEN_NONE)
     if (!AddVectoredExceptionHandler(/* FirstHandler = */ true, WasmFaultHandler))
         return false;
+#  else
+    // Varan (M3, Finding A): in interpreter-only builds (JS_CODEGEN_NONE)
+    // there is NO JIT/wasm code that can take a heap-access fault, so WasmFaultHandler has
+    // nothing to handle -- and its ContextToPC() is a MOZ_CRASH() stub under JS_CODEGEN_NONE
+    // (see above). Installed FirstHandler=true it would intercept EVERY process-wide access
+    // violation and MOZ_CRASH, MASKING the real fault (device m3-08: it hid an nsRuleNode::SetFont
+    // AV behind a WasmFaultHandler decoy). Do NOT install it here; let real AVs reach WER with
+    // their true fault site. (sHaveSignalHandlers is still set true below -- nothing on this
+    // build path depends on the VEH being present.)
+#  endif
 # elif defined(XP_DARWIN)
     // OSX handles seg faults via the Mach exception handler above, so don't
     // install WasmFaultHandler.

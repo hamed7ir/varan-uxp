@@ -93,6 +93,10 @@ NS_IMETHODIMP nsTransactionList::GetData(int32_t aIndex,
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
+  // Varan (M4.1b): an OOB index leaves item null (the mTxnStack
+  // branch has no NS_ENSURE_SUCCESS); guard like the 4 sibling methods do.
+  NS_ENSURE_TRUE(item, NS_ERROR_FAILURE);
+
   nsCOMArray<nsISupports>& data = item->GetData();
   nsISupports** ret = static_cast<nsISupports**>(moz_xmalloc(data.Count() *
     sizeof(nsISupports*)));

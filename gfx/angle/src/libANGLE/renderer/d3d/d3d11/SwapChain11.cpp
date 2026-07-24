@@ -9,6 +9,8 @@
 #include "libANGLE/renderer/d3d/d3d11/SwapChain11.h"
 
 #include <EGL/eglext.h>
+#include <cstdio>  // Varan (GPU diag): snprintf
+#include "common/VaranGpuLog.h"  // Varan (GPU diag): %TEMP%aran-gpu.log (no DebugView on RT)
 
 #include "libANGLE/features.h"
 #include "libANGLE/renderer/d3d/d3d11/formatutils11.h"
@@ -537,6 +539,15 @@ EGLint SwapChain11::reset(EGLint backbufferWidth, EGLint backbufferHeight, EGLin
         if (FAILED(result))
         {
             ERR("Could not create additional swap chains or offscreen surfaces: %08lX", result);
+            // Varan (GPU diag): L3a -- native swapchain creation failure HRESULT (release-unconditional).
+            {
+                char varanGpuL3a[256];
+                snprintf(varanGpuL3a, sizeof(varanGpuL3a),
+                         "VARAN-GPU L3a: NativeWindow createSwapChain FAILED hr=0x%08lX -> %s\n",
+                         static_cast<unsigned long>(result),
+                         d3d11::isDeviceLostError(result) ? "EGL_CONTEXT_LOST" : "EGL_BAD_ALLOC");
+                VaranGpuLog(varanGpuL3a);
+            }
             release();
 
             if (d3d11::isDeviceLostError(result))

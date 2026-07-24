@@ -20,6 +20,26 @@
 
 using namespace js;
 using namespace js::jit;
+// ---- C7 (Batch F): the Thumb bit on SYNTHESIZED code addresses ----------------------------------
+// These are addresses built in C++ as `code->raw() + offset` and later branched through via
+// `ldr pc` / `bx lr`. On Thumb-2 the low bit of a branch target selects the instruction set: odd =
+// Thumb, EVEN = ARM. B1 ORs the bit at the branch for everything that reaches PC through a register
+// (ma_bx / ma_blx / call(Register)), but these three sinks have NO branch-time register to OR --
+// ret() -> `ldr.w pc,[sp],#4`, retn() -> ma_popn_pc, and EmitReturnFromIC's raw `bx lr` fed by
+// EmitChangeICReturnAddress -- so the bit must be set at CONSTRUCTION.
+//
+// Applied ONLY at the sites the C7 consumer audit cleared
+// (varan-jit/recon + jit-recon/c7-consumers/C7-CONSUMERS.md). Deliberately NOT applied to
+// prologue/epilogue/postDebugPrologue addrs, IonOsrTempData::jitcode, rfe->target, yieldEntryList or
+// BaselineFrame::initForOsr (all reach PC only through ma_bx, so B1 already covers them), and NEVER
+// to CodeLocation::repoint -- PatchJump does PC-relative `target - s0` arithmetic there and bit0
+// would produce off-by-one branch offsets. Over-applying this fix is itself the bug.
+#if defined(VARAN_THUMB2)
+# define VARAN_C7_ORBIT(x) ((decltype(x))(uintptr_t(x) | 1))
+#else
+# define VARAN_C7_ORBIT(x) (x)
+#endif
+
 
 static const FloatRegisterSet NonVolatileFloatRegs =
     FloatRegisterSet((1ULL << FloatRegisters::d8) |
@@ -206,12 +226,21 @@ JitRuntime::generateEnterJIT(JSContext* cx, EnterJitType type)
     masm.ma_sub(r8, sp, r8);
     masm.makeFrameDescriptor(r8, JitFrame_Entry, JitFrameLayout::Size());
 
+#if defined(VARAN_THUMB2)
+    // Thumb-2 has no STMIB (increment-before) form; the DTM path would UDF (0x28b). IB from sp writes
+    // r8/r9/r10 to [sp+4]/[sp+8]/[sp+12] -- synthesize with three plain word stores. [sp+0] (the return
+    // address) is written later, exactly as the IB stmib left it.
+    masm.ma_str(r8,  DTRAddr(sp, DtrOffImm(4)));   // [sp,4]  = descriptor, argc*8+20
+    masm.ma_str(r9,  DTRAddr(sp, DtrOffImm(8)));   // [sp,8]  = callee token
+    masm.ma_str(r10, DTRAddr(sp, DtrOffImm(12)));  // [sp,12] = actual arguments
+#else
     masm.startDataTransferM(IsStore, sp, IB, NoWriteBack);
                            // [sp]    = return address (written later)
     masm.transferReg(r8);  // [sp',4] = descriptor, argc*8+20
     masm.transferReg(r9);  // [sp',8]  = callee token
     masm.transferReg(r10); // [sp',12]  = actual arguments
     masm.finishDataTransfer();
+#endif
 
     Label returnLabel;
     if (type == EnterJitBaseline) {
@@ -240,8 +269,31 @@ JitRuntime::generateEnterJIT(JSContext* cx, EnterJitType type)
         {
             AutoForbidPools afp(&masm, 5);
             Label skipJump;
+#if defined(VARAN_THUMB2)
+            // Thumb-2 layout is FOUR wide instructions, and the PC read is folded into an ADR:
+            //   +0 addw scratch,pc,#9   +4 str scratch,[sp]   +8 b skipJump   +12 b returnLabel
+            // ADR gives Align(PC,4) + imm = 4 + 9 = 13 = 12|1, i.e. the address of `b returnLabel`
+            // WITH the Thumb bit (F2) -- this value is the frame's return address and returning
+            // through it interworks off bit0, so an even address would drop to ARM state and fault.
+            //
+            // Two things were wrong with the A32 sequence below, and BOTH are device-lethal:
+            //  1. it assumes PC reads as insn+8 (A32). Thumb-2 reads Align(insn+4,4), so the +8
+            //     landed one instruction short, on `b skipJump`, and the OSR frame returned straight
+            //     past its own return handling. This is what produced the 8 large-frame access
+            //     violations; it was masked until Batch A STEP 1a stopped the simulator reporting
+            //     the A32 pc+8, which had been propping it up.
+            //  2. `mov scratch, pc` has NO legal wide encoding: MOV.W cannot take PC as a source
+            //     (only the 16-bit T1 `mov rd,pc` may), and `add.w rd,pc,#imm` is illegal too --
+            //     LLVM's assembler refuses both. ADR is the only legal wide form, which is why this
+            //     is a re-shape rather than a constant tweak.
+            // imm = 9: ADR already contributes Align(PC,4) = +4, so reaching +12 needs 8 more,
+            // plus 1 for the Thumb bit. (The A32 arm's "2 instructions" counts from a +8 PC read;
+            // do not copy that constant here -- the bases differ.)
+            masm.as_adr(scratch, 2 * sizeof(uint32_t) + 1);
+#else
             masm.mov(pc, scratch);
             masm.addPtr(Imm32(2 * sizeof(uint32_t)), scratch);
+#endif
             masm.storePtr(scratch, Address(sp, 0));
             masm.jump(&skipJump);
             masm.jump(&returnLabel);
@@ -262,7 +314,10 @@ JitRuntime::generateEnterJIT(JSContext* cx, EnterJitType type)
         masm.ma_lsl(Imm32(3), numStackValues, scratch);
         masm.subPtr(scratch, framePtr);
         {
-            masm.ma_sub(sp, Imm32(WINDOWS_BIG_FRAME_TOUCH_INCREMENT), scratch);
+            // Varan M1: ARM32 ma_sub(reg, Imm32, reg) requires a scratch scope; the
+            // portable subPtr does scratch = sp - WINDOWS_BIG_FRAME_TOUCH_INCREMENT.
+            masm.mov(sp, scratch);
+            masm.subPtr(Imm32(WINDOWS_BIG_FRAME_TOUCH_INCREMENT), scratch);
 
             Label touchFrameLoop;
             Label touchFrameLoopEnd;
@@ -400,12 +455,36 @@ JitRuntime::generateInvalidator(JSContext* cx)
     // be aligned, and there is no good reason to automatically align it with a
     // call to setupUnalignedABICall.
     masm.as_bic(sp, sp, Imm8(7));
+#if defined(VARAN_THUMB2)
+    // T2 STM cannot hold sp(13)/pc(15); synthesize the full 16-register snapshot as per-register stores
+    // (stmdb sp!, {r0-r15} -> sub sp,#64 then str r_i,[sp,#i*4]). The reader indexes register i at
+    // snapshot_base + i*4, so all 16 slots are kept. sp(13) records the ORIGINAL sp (before the reserve);
+    // pc(15) records 0 (the A32 stm stored pc+8 -- an address never restored). r12(ip) is the scratch:
+    // its own slot (i=12) is stored with its live value BEFORE it is reused below.
+    {
+        const int32_t kSnap = int32_t(Registers::Total) * 4;   // 16 * 4
+        const Register ip12 = Register::FromCode(12);
+        masm.as_sub(sp, sp, Imm8(kSnap));                      // sp -= 64 (64 is a valid modified-imm)
+        for (uint32_t i = 0; i < Registers::Total; i++) {
+            if (i == 13) {                                     // sp: store the original sp
+                masm.as_add(ip12, sp, Imm8(kSnap));
+                masm.ma_str(ip12, DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            } else if (i == 15) {                              // pc: inert placeholder
+                masm.ma_mov(Imm32(0), ip12);
+                masm.ma_str(ip12, DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            } else {
+                masm.ma_str(Register::FromCode(i), DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            }
+        }
+    }
+#else
     masm.startDataTransferM(IsStore, sp, DB, WriteBack);
     // We don't have to push everything, but this is likely easier.
     // Setting regs_.
     for (uint32_t i = 0; i < Registers::Total; i++)
         masm.transferReg(Register::FromCode(i));
     masm.finishDataTransfer();
+#endif
 
     // Since our datastructures for stack inspection are compile-time fixed,
     // if there are only 16 double registers, then we need to reserve
@@ -585,7 +664,7 @@ JitRuntime::generateArgumentsRectifier(JSContext* cx, void** returnAddrOut)
     JitCode* code = linker.newCode<NoGC>(cx, OTHER_CODE);
 
     if (returnAddrOut)
-        *returnAddrOut = (void*) (code->raw() + returnOffset);
+        *returnAddrOut = VARAN_C7_ORBIT((void*) (code->raw() + returnOffset));
 
 #ifdef JS_ION_PERF
     writePerfSpewerJitCodeProfile(code, "ArgumentsRectifier");
@@ -608,12 +687,36 @@ PushBailoutFrame(MacroAssembler& masm, uint32_t frameClass, Register spArg)
     // everything.
     // sp % 8 == 0
 
+#if defined(VARAN_THUMB2)
+    // T2 STM cannot hold sp(13)/pc(15); synthesize the full 16-register snapshot as per-register stores
+    // (stmdb sp!, {r0-r15} -> sub sp,#64 then str r_i,[sp,#i*4]). The reader indexes register i at
+    // snapshot_base + i*4, so all 16 slots are kept. sp(13) records the ORIGINAL sp (before the reserve);
+    // pc(15) records 0 (the A32 stm stored pc+8 -- an address never restored). r12(ip) is the scratch:
+    // its own slot (i=12) is stored with its live value BEFORE it is reused below.
+    {
+        const int32_t kSnap = int32_t(Registers::Total) * 4;   // 16 * 4
+        const Register ip12 = Register::FromCode(12);
+        masm.as_sub(sp, sp, Imm8(kSnap));                      // sp -= 64 (64 is a valid modified-imm)
+        for (uint32_t i = 0; i < Registers::Total; i++) {
+            if (i == 13) {                                     // sp: store the original sp
+                masm.as_add(ip12, sp, Imm8(kSnap));
+                masm.ma_str(ip12, DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            } else if (i == 15) {                              // pc: inert placeholder
+                masm.ma_mov(Imm32(0), ip12);
+                masm.ma_str(ip12, DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            } else {
+                masm.ma_str(Register::FromCode(i), DTRAddr(sp, DtrOffImm(int32_t(i) * 4)));
+            }
+        }
+    }
+#else
     masm.startDataTransferM(IsStore, sp, DB, WriteBack);
     // We don't have to push everything, but this is likely easier.
     // Setting regs_.
     for (uint32_t i = 0; i < Registers::Total; i++)
         masm.transferReg(Register::FromCode(i));
     masm.finishDataTransfer();
+#endif
 
     ScratchRegisterScope scratch(masm);
 
@@ -1029,7 +1132,20 @@ JitRuntime::generateDebugTrapHandler(JSContext* cx)
     // trap stub so that execution continues at the current pc.
     Label forcedReturn;
     masm.branchTest32(Assembler::NonZero, ReturnReg, ReturnReg, &forcedReturn);
+#if defined(VARAN_THUMB2)
+    // B3 -- the CONTINUE arm (stub returned false: resume at the trapped pc). `mov pc, lr` is the
+    // A32 idiom; in Thumb-2 MOV.W cannot target PC (UNPREDICTABLE, and LLVM refuses to assemble
+    // `mov.w pc, lr`). Worse, the simulator's T3 data-proc arm does `if (rd != 15) set_register(...)`,
+    // so this instruction was a SILENT NO-OP: control fell through into `forcedReturn`, returning an
+    // uninitialised BaselineFrame::returnValue() and skipping the debug epilogue entirely. That is
+    // the single root cause behind ~56 debug/ jit-test failures.
+    //
+    // `bx lr` is the correct T2 return and interworks off lr's bit0 (set by the hardware BLX that
+    // got us here) -- the same fix already applied in EmitReturnFromIC.
+    masm.as_bx(lr);
+#else
     masm.mov(lr, pc);
+#endif
 
     masm.bind(&forcedReturn);
     masm.loadValue(Address(r11, BaselineFrame::reverseOffsetOfReturnValue()),

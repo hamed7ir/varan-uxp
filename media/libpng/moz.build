@@ -26,7 +26,8 @@ SOURCES += [
     'pngwutil.c'
 ]
 
-if CONFIG['CPU_ARCH'] == 'arm':
+# Non-WINNT ARM (Linux/Android): upstream set = C intrinsics + the A32 filter_neon.S.
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] != 'WINNT':
     DEFINES['MOZ_PNG_USE_ARM_NEON'] = True
     SOURCES += [
         'arm/arm_init.c',
@@ -36,6 +37,24 @@ if CONFIG['CPU_ARCH'] == 'arm':
 
     SOURCES += [
         'arm/filter_neon.S'
+    ]
+
+# Varan (M4.2 Stage B, 2026-07-18): Windows-on-ARM (thumbv7-windows-msvc)
+# NEON via the PURE-C intrinsics ONLY. MOZ_PNG_USE_ARM_NEON -> pnglibconf.h undefs
+# PNG_ARM_NEON_OPT + defines PNG_ALIGNED_MEMORY_SUPPORTED -> pngpriv.h:138 sees clang-cl's
+# __ARM_NEON -> PNG_ARM_NEON_OPT=2 -> PNG_ARM_NEON_IMPLEMENTATION=1 (intrinsics). At OPT=2
+# the runtime check is NOT compiled (PNG_ARM_NEON_CHECK_SUPPORTED undefined) so arm_init.c
+# needs no linux.c. The A32 arm/filter_neon.S is EXCLUDED (dialect-forbidden on Win RT;
+# it is IMPLEMENTATION==2 only). No -mfpu flag needed (target already provides NEON).
+# PER-LIBRARY ONLY: the global BUILD_ARM_NEON stays '' (arch.m4 WINNT guard) -- this does
+# NOT sweep in gfx/dom NEON TUs. -Zi kept (T5: NEON C intrinsics did not ICE on clang-cl
+# 18.1.8); drop only if a specific TU genuinely ICEs.
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] == 'WINNT':
+    DEFINES['MOZ_PNG_USE_ARM_NEON'] = True
+    SOURCES += [
+        'arm/arm_init.c',
+        'arm/filter_neon_intrinsics.c',
+        'arm/palette_neon_intrinsics.c'
     ]
 
 if CONFIG['INTEL_ARCHITECTURE']:

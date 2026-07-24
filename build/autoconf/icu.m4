@@ -50,7 +50,10 @@ AC_SUBST(MOZ_ICU_DATA_ARCHIVE)
 AC_SUBST(MOZ_SHARED_ICU)
 
 if test -n "$USE_ICU"; then
-    if test -z "$YASM" -a -z "$GNU_AS" -a "$COMPILE_ENVIRONMENT"; then
+    dnl Varan M1: on ARM there is no yasm object format and clang-cl is not GNU_AS,
+    dnl but ICU here uses MOZ_ICU_DATA_ARCHIVE (prebuilt icudt*.dat shipped beside the
+    dnl exe, icustubdata linked) so NO assembler is needed for the data. Skip the check.
+    if test -z "$YASM" -a -z "$GNU_AS" -a "$COMPILE_ENVIRONMENT" -a "$CPU_ARCH" != "arm"; then
       AC_MSG_ERROR([Building ICU requires either yasm or a GNU assembler. If you do not have either of those available for this platform you must use --without-intl-api])
     fi
     if test -z "$MOZ_SHARED_ICU"; then

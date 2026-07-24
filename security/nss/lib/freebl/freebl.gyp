@@ -531,7 +531,10 @@
           ],
         }],
         [ 'disable_arm32_neon==1 and target_arch=="arm"', {
-          'defines!': [
+          # Varan: ADD the define (was 'defines!' = subtractive, so
+          # NSS_DISABLE_ARM32_NEON was never actually defined -> USE_ARM_GCM leaked true ->
+          # gcm.c referenced the ARM hw-crypto gcm_Hash*_hw stubs that are not compiled).
+          'defines': [
             'NSS_DISABLE_ARM32_NEON',
           ],
         }],
@@ -618,7 +621,10 @@
           ],
         }],
         [ 'disable_arm32_neon==1 and target_arch=="arm"', {
-          'defines!': [
+          # Varan: ADD the define (was 'defines!' = subtractive, so
+          # NSS_DISABLE_ARM32_NEON was never actually defined -> USE_ARM_GCM leaked true ->
+          # gcm.c referenced the ARM hw-crypto gcm_Hash*_hw stubs that are not compiled).
+          'defines': [
             'NSS_DISABLE_ARM32_NEON',
           ],
         }],
@@ -933,10 +939,14 @@
       }, {
         'have_int128_support%': 0,
       }],
-      [ 'target_arch=="arm"', {
+      [ 'target_arch=="arm" and (OS=="linux" or OS=="android")', {
         # When the compiler uses the softfloat ABI, we want to use the compatible softfp ABI when enabling NEON for these objects.
         # Confusingly, __SOFTFP__ is the name of the define for the softfloat ABI, not for the softfp ABI.
         'softfp_cflags': '<!(${CC:-cc} -o - -E -dM - ${CFLAGS} < /dev/null | grep __SOFTFP__ > /dev/null && echo -mfloat-abi=softfp || true)',
+      }, 'target_arch=="arm"', {
+        # Varan: Windows ARM is hardfp/VFP (no softfp ABI), and this
+        # POSIX <!() probe fails anyway under gyp's cmd.exe shell on Windows. Empty.
+        'softfp_cflags': '',
       }],
     ],
   }

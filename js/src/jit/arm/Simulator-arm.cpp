@@ -63,6 +63,10 @@ __aeabi_uidivmod(int x, int y)
 }
 }
 
+#if defined(VARAN_THUMB2)
+void VaranDumpUdfCensus();   // emit-time UDF census dump; defined in Assembler-arm.cpp (global scope)
+#endif
+
 namespace js {
 namespace jit {
 
@@ -1289,7 +1293,26 @@ int32_t
 Simulator::get_register(int reg) const
 {
     MOZ_ASSERT(reg >= 0 && reg < num_registers);
+#if defined(VARAN_THUMB2)
+    // Thumb-2 reads PC as Align(current + 4, 4). The A32 value is current + 8
+    // (SimInstruction::kPCReadOffset), which is +4 too high for every T2 pc-relative form.
+    //
+    // This is LIVE, not latent. Two paths reach here with rn == pc:
+    //   (a) the 0x7c single load/store case, `basev = get_register(rn)` with rn == 15;
+    //   (b) the VLDR-literal pool load -- ma_vimm/ma_vimm_f32 -> as_FImm64Pool/as_FImm32Pool is the
+    //       one live pool surface -- which the 0x76/0x77 VFP case un-swaps and delegates to the A32
+    //       decodeType6, landing on this same accessor.
+    // The ENCODERS already emit T2-correct offsets (pcBias = 4), so an A32 +8 base here reads the
+    // pool word 4 bytes high: a silent wrong VALUE, not a crash.
+    //
+    // Align() is a no-op under the wide-only invariant (every slot is 4-byte aligned), but it is
+    // written explicitly so that a future 16-bit slot cannot silently reintroduce the bug.
+    if (reg == pc)
+        return int32_t((uint32_t(registers_[pc]) + 4) & ~uint32_t(3));
+    return registers_[reg];
+#else
     return registers_[reg] + ((reg == pc) ? SimInstruction::kPCReadOffset : 0);
+#endif
 }
 
 double
@@ -1577,8 +1600,14 @@ Simulator::readQ(int32_t addr, SimInstruction* instr, UnalignedPolicy f)
         return value;
     }
 
-    printf("Unaligned read at 0x%08x, pc=%p\n", addr, instr);
-    MOZ_CRASH();
+    // Varan: stderr + flush, NOT printf. MOZ_CRASH() aborts, and abort does not flush stdout's
+    // buffer -- so upstream's diagnostic destroyed the only two facts that identify the fault
+    // (address and pc), leaving an unattributable bare "Hit MOZ_CRASH()". Device-relevant: a real
+    // Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned READ at 0x%08x (addr&3=%d), pc=%p\n",
+            addr, int(addr & 3), instr);
+    fflush(stderr);
+    MOZ_CRASH("VARAN-SIM: unaligned read in generated code");
 }
 
 void
@@ -1600,8 +1629,12 @@ Simulator::writeQ(int32_t addr, uint64_t value, SimInstruction* instr, Unaligned
         return;
     }
 
-    printf("Unaligned write at 0x%08x, pc=%p\n", addr, instr);
-    MOZ_CRASH();
+    // Varan: see the READ counterpart -- stdout is not flushed on abort, so upstream's printf lost
+    // the address and pc that identify the fault.
+    fprintf(stderr, "VARAN-SIM: Unaligned WRITE at 0x%08x (addr&3=%d), pc=%p\n",
+            addr, int(addr & 3), instr);
+    fflush(stderr);
+    MOZ_CRASH("VARAN-SIM: unaligned write in generated code");
 }
 
 int
@@ -1626,8 +1659,14 @@ Simulator::readW(int32_t addr, SimInstruction* instr, UnalignedPolicy f)
         return value;
     }
 
-    printf("Unaligned read at 0x%08x, pc=%p\n", addr, instr);
-    MOZ_CRASH();
+    // Varan: stderr + flush, NOT printf. MOZ_CRASH() aborts, and abort does not flush stdout's
+    // buffer -- so upstream's diagnostic destroyed the only two facts that identify the fault
+    // (address and pc), leaving an unattributable bare "Hit MOZ_CRASH()". Device-relevant: a real
+    // Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned READ at 0x%08x (addr&3=%d), pc=%p\n",
+            addr, int(addr & 3), instr);
+    fflush(stderr);
+    MOZ_CRASH("VARAN-SIM: unaligned read in generated code");
 }
 
 void
@@ -1649,8 +1688,12 @@ Simulator::writeW(int32_t addr, int value, SimInstruction* instr, UnalignedPolic
         return;
     }
 
-    printf("Unaligned write at 0x%08x, pc=%p\n", addr, instr);
-    MOZ_CRASH();
+    // Varan: see the READ counterpart -- stdout is not flushed on abort, so upstream's printf lost
+    // the address and pc that identify the fault.
+    fprintf(stderr, "VARAN-SIM: Unaligned WRITE at 0x%08x (addr&3=%d), pc=%p\n",
+            addr, int(addr & 3), instr);
+    fflush(stderr);
+    MOZ_CRASH("VARAN-SIM: unaligned write in generated code");
 }
 
 // For the time being, define Relaxed operations in terms of SeqCst
@@ -1683,7 +1726,11 @@ Simulator::readExW(int32_t addr, SimInstruction* instr)
         exclusiveMonitorSet(value);
         return value;
     } else {
-        printf("Unaligned write at 0x%08x, pc=%p\n", addr, instr);
+        // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+        // original printf destroyed the address/pc that identify the fault. Device-relevant:
+        // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+        fprintf(stderr, "VARAN-SIM: Unaligned write at 0x%08x, pc=%p\n", addr, instr);
+        fflush(stderr);
         MOZ_CRASH();
     }
 }
@@ -1701,8 +1748,12 @@ Simulator::writeExW(int32_t addr, int value, SimInstruction* instr)
         return old != expected;
     }
 
-    printf("Unaligned write at 0x%08x, pc=%p\n", addr, instr);
-    MOZ_CRASH();
+    // Varan: see the READ counterpart -- stdout is not flushed on abort, so upstream's printf lost
+    // the address and pc that identify the fault.
+    fprintf(stderr, "VARAN-SIM: Unaligned WRITE at 0x%08x (addr&3=%d), pc=%p\n",
+            addr, int(addr & 3), instr);
+    fflush(stderr);
+    MOZ_CRASH("VARAN-SIM: unaligned write in generated code");
 }
 
 uint16_t
@@ -1726,7 +1777,11 @@ Simulator::readHU(int32_t addr, SimInstruction* instr)
         return value;
     }
 
-    printf("Unaligned unsigned halfword read at 0x%08x, pc=%p\n", addr, instr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned unsigned halfword read at 0x%08x, pc=%p\n", addr, instr);
+    fflush(stderr);
     MOZ_CRASH();
     return 0;
 }
@@ -1750,7 +1805,11 @@ Simulator::readH(int32_t addr, SimInstruction* instr)
         return value;
     }
 
-    printf("Unaligned signed halfword read at 0x%08x\n", addr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned signed halfword read at 0x%08x\n", addr);
+    fflush(stderr);
     MOZ_CRASH();
     return 0;
 }
@@ -1774,7 +1833,11 @@ Simulator::writeH(int32_t addr, uint16_t value, SimInstruction* instr)
         return;
     }
 
-    printf("Unaligned unsigned halfword write at 0x%08x, pc=%p\n", addr, instr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned unsigned halfword write at 0x%08x, pc=%p\n", addr, instr);
+    fflush(stderr);
     MOZ_CRASH();
 }
 
@@ -1797,7 +1860,11 @@ Simulator::writeH(int32_t addr, int16_t value, SimInstruction* instr)
         return;
     }
 
-    printf("Unaligned halfword write at 0x%08x, pc=%p\n", addr, instr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned halfword write at 0x%08x, pc=%p\n", addr, instr);
+    fflush(stderr);
     MOZ_CRASH();
 }
 
@@ -1812,7 +1879,11 @@ Simulator::readExHU(int32_t addr, SimInstruction* instr)
         exclusiveMonitorSet(value);
         return value;
     }
-    printf("Unaligned atomic unsigned halfword read at 0x%08x, pc=%p\n", addr, instr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned atomic unsigned halfword read at 0x%08x, pc=%p\n", addr, instr);
+    fflush(stderr);
     MOZ_CRASH();
     return 0;
 }
@@ -1829,7 +1900,11 @@ Simulator::writeExH(int32_t addr, uint16_t value, SimInstruction* instr)
         uint16_t old = compareExchangeRelaxed(ptr, expected, value);
         return old != expected;
     } else {
-        printf("Unaligned atomic unsigned halfword write at 0x%08x, pc=%p\n", addr, instr);
+        // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+        // original printf destroyed the address/pc that identify the fault. Device-relevant:
+        // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+        fprintf(stderr, "VARAN-SIM: Unaligned atomic unsigned halfword write at 0x%08x, pc=%p\n", addr, instr);
+        fflush(stderr);
         MOZ_CRASH();
     }
 }
@@ -1902,7 +1977,11 @@ Simulator::readDW(int32_t addr)
         int32_t* ptr = reinterpret_cast<int32_t*>(addr);
         return ptr;
     }
-    printf("Unaligned read at 0x%08x\n", addr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned read at 0x%08x\n", addr);
+    fflush(stderr);
     MOZ_CRASH();
     return 0;
 }
@@ -1915,7 +1994,11 @@ Simulator::writeDW(int32_t addr, int32_t value1, int32_t value2)
         *ptr++ = value1;
         *ptr = value2;
     } else {
-        printf("Unaligned write at 0x%08x\n", addr);
+        // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+        // original printf destroyed the address/pc that identify the fault. Device-relevant:
+        // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+        fprintf(stderr, "VARAN-SIM: Unaligned write at 0x%08x\n", addr);
+        fflush(stderr);
         MOZ_CRASH();
     }
 }
@@ -1934,7 +2017,11 @@ Simulator::readExDW(int32_t addr, int32_t* hibits)
         *hibits = int32_t(value);
         return int32_t(value >> 32);
     }
-    printf("Unaligned read at 0x%08x\n", addr);
+    // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+    // original printf destroyed the address/pc that identify the fault. Device-relevant:
+    // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+    fprintf(stderr, "VARAN-SIM: Unaligned read at 0x%08x\n", addr);
+    fflush(stderr);
     MOZ_CRASH();
     return 0;
 #endif
@@ -1957,7 +2044,11 @@ Simulator::writeExDW(int32_t addr, int32_t value1, int32_t value2)
         uint64_t old = compareExchangeRelaxed(ptr, expected, value);
         return old != expected;
     } else {
-        printf("Unaligned write at 0x%08x\n", addr);
+        // Varan: stderr + flush -- MOZ_CRASH aborts and abort does NOT flush stdout, so the
+        // original printf destroyed the address/pc that identify the fault. Device-relevant:
+        // a real Cortex-A9 without HWCAP_FIXUP_FAULT FAULTS on misaligned VLDR/VSTR/LDRD/STRD/LDM.
+        fprintf(stderr, "VARAN-SIM: Unaligned write at 0x%08x\n", addr);
+        fflush(stderr);
         MOZ_CRASH();
     }
 #endif
@@ -4650,6 +4741,12 @@ Simulator::instructionDecode(SimInstruction* instr)
 
     pc_modified_ = false;
 
+#if defined(VARAN_THUMB2)
+    // The VARAN encoder emits ONLY Thumb-2 (device is Thumb-only, F1). Decode as Thumb-2.
+    varanThumb2Decode(instr);
+    return;
+#endif
+
     static const uint32_t kSpecialCondition = 15 << 28;
     if (instr->conditionField() == kSpecialCondition) {
         decodeSpecialCondition(instr);
@@ -4689,6 +4786,567 @@ Simulator::instructionDecode(SimInstruction* instr)
     if (!pc_modified_)
         set_register(pc, reinterpret_cast<int32_t>(instr) + SimInstruction::kInstrSize);
 }
+
+#if defined(VARAN_THUMB2)
+// B12 -- the interworking ORACLE. On real ARM the low bit of a BX/BLX/ldr-pc target selects the
+// instruction set: odd = Thumb, EVEN = ARM. This backend is Thumb-2 ONLY, so an even target means
+// the core switches to ARM state and executes our Thumb halfwords as A32 -- device-lethal.
+//
+// The simulator cannot see this on its own: varanThumb2Decode fetches at `instr & ~1`, so an even
+// target executes perfectly here. That mask is CORRECT (hardware does the same) and stays; the check
+// belongs at the branch OPERAND instead. Without this guard every test can pass while the port is
+// dead on silicon -- which is exactly how the OSR pc+8 bug survived.
+//
+// SCOPE IS DELIBERATE AND NARROW. Only the four architecturally-interworking writers are checked:
+// BX, BLX, `ldr pc`, `ldm{pc}`. NOT Simulator::set_pc and NOT set_register(pc,...) generally -- the
+// sequential advance (`baseAddr + len`) and direct B/BL (`baseAddr + 4 + off`) write legitimately
+// EVEN values and cannot change state, so guarding those would fire on the first instruction
+// executed and make the simulator unbootable.
+void
+Simulator::varanCheckInterworkTarget(int32_t target, const char* site)
+{
+    if (target & 1)
+        return;                       // Thumb bit present -- correct.
+    if (target == end_sim_pc)
+        return;                       // callInternal's end-of-simulation sentinel, not a real branch.
+
+    // LEGITIMATE EXEMPTION (not a weakening): a C++ call redirection stub. The simulator replaces a
+    // native/VM call target with a Redirection whose body is a synthetic A32 svc word
+    // (0xEF000010 = AL | 0xf<<24 | kCallRtRedirected); MacroAssemblerARM::ma_call branches to
+    // Redirection::addressOfSwiInstruction(), a plain heap field address that is legitimately EVEN
+    // and is never real Thumb code -- varanThumb2Decode recognises the word and routes to
+    // softwareInterrupt instead of decoding it. This is exactly why ma_call is excluded from B1:
+    // OR-ing bit0 there would corrupt the Redirection* that softwareInterrupt derives by subtracting
+    // a field offset. Detect the stub with the same word test the fetch path uses.
+    if (target > 0x1000) {
+        const uint16_t* w = reinterpret_cast<const uint16_t*>(uintptr_t(uint32_t(target)));
+        if ((uint32_t(w[0]) | (uint32_t(w[1]) << 16)) ==
+            (uint32_t(Assembler::AL) | (0xfu << 24) | uint32_t(kCallRtRedirected)))
+            return;
+    }
+    fprintf(stderr,
+            "VARAN-SIM: %s to EVEN target 0x%08x -- Thumb bit missing. On device this switches to "
+            "ARM state and executes Thumb halfwords as A32.\n",
+            site, uint32_t(target));
+    MOZ_CRASH("VARAN-SIM: interworking branch to a non-Thumb (even) target");
+}
+
+void
+Simulator::varanThumb2Decode(SimInstruction* instr)
+{
+    // Thumb-only sim: bit0 of a branch target is the interworking bit; mask it for the fetch
+    // address (as hardware does). Everything the encoder currently emits decodes here.
+    uintptr_t baseAddr = reinterpret_cast<uintptr_t>(instr) & ~uintptr_t(1);
+    const uint16_t* p = reinterpret_cast<const uint16_t*>(baseAddr);
+    uint16_t hw0 = p[0];
+
+    // C++ call redirection: the sim replaces a VM/native call target with a Redirection stub whose
+    // body is an A32 svc word (0xEF000010 = AL | 0xf<<24 | kCallRtRedirected). A Thumb `blx <stub>`
+    // lands here; the sim is Thumb-only, so recognize the redirect word and route to the shared
+    // softwareInterrupt handler (reads args from r0-r3/stack, calls the native fn, returns to lr via
+    // set_pc). Without this the Thumb decoder mis-reads the low halfword (0x0010) and crashes.
+    if ((uint32_t(p[0]) | (uint32_t(p[1]) << 16)) ==
+        (uint32_t(Assembler::AL) | (0xfu << 24) | uint32_t(kCallRtRedirected))) {
+        // MASKED, not `instr`. B1 makes every blx target odd, so `instr` arrives with bit0 set.
+        // Simulator::softwareInterrupt derives a Redirection* by subtracting a field offset from
+        // this pointer (Redirection::FromSwiInstruction), so an odd value yields a Redirection*
+        // one byte off and a garbage nativeFunction_/type_ -- a silent wrong call, not a crash.
+        softwareInterrupt(reinterpret_cast<SimInstruction*>(baseAddr));
+        return;
+    }
+
+    // Instruction length: first-halfword bits[15:11] of 11101/11110/11111 => 32-bit, else 16-bit.
+    uint32_t top5 = (hw0 >> 11) & 0x1f;
+    bool is32 = (top5 == 0x1d || top5 == 0x1e || top5 == 0x1f);
+    int len = is32 ? 4 : 2;
+
+    if (is32) {
+        uint16_t hw1 = p[1];
+        if ((hw0 >> 9) == 0x75u) {
+            // T3 data-processing (shifted register). Rm is shifted by an immediate amount
+            // (shamt = imm3:imm2) with type LSL/LSR/ASR/ROR. The encoder DOES emit non-zero
+            // shifts (e.g. the frame-descriptor 'mov rX, rY, lsl #8'); the shift MUST be applied
+            // -- the earlier "LSL #0 only" assumption was wrong and silently dropped the shift.
+            uint32_t op4   = (hw0 >> 5) & 0xf;
+            bool     setCC = (hw0 >> 4) & 1;
+            uint32_t rn    = hw0 & 0xf;
+            uint32_t rd    = (hw1 >> 8) & 0xf;
+            uint32_t rm    = hw1 & 0xf;
+            uint32_t shty  = (hw1 >> 4) & 3;                                   // 0 LSL / 1 LSR / 2 ASR / 3 ROR
+            uint32_t shamt = (((hw1 >> 12) & 7) << 2) | ((hw1 >> 6) & 3);      // imm3:imm2
+            uint32_t xrm   = uint32_t(get_register(rm));
+            int32_t  vn    = (rn == 15) ? 0 : get_register(rn);   // Rn=15 => MOV/MVN (handled per-op)
+            bool     shco  = c_flag_;                             // shifter carry-out (LSL #0 leaves C)
+            int32_t  vm;
+            switch (shty) {
+              case 0:                                                         // LSL (imm 0..31)
+                if (shamt) { shco = (xrm >> (32 - shamt)) & 1; vm = int32_t(xrm << shamt); }
+                else vm = int32_t(xrm);
+                break;
+              case 1: { uint32_t s = shamt ? shamt : 32;                      // LSR (#0 => #32)
+                shco = (s == 32) ? ((xrm >> 31) & 1) : ((xrm >> (s - 1)) & 1);
+                vm   = (s == 32) ? 0 : int32_t(xrm >> s); break; }
+              case 2: { uint32_t s = shamt ? shamt : 32;                      // ASR (#0 => #32)
+                shco = (s >= 32) ? ((xrm >> 31) & 1) : ((xrm >> (s - 1)) & 1);
+                vm   = (s >= 32) ? (int32_t(xrm) >> 31) : (int32_t(xrm) >> s); break; }
+              default:                                                        // ROR (#0 => RRX)
+                if (shamt) { shco = (xrm >> (shamt - 1)) & 1; vm = int32_t((xrm >> shamt) | (xrm << (32 - shamt))); }
+                else { shco = xrm & 1; vm = int32_t((uint32_t(c_flag_) << 31) | (xrm >> 1)); }
+                break;
+            }
+            int      cin   = c_flag_ ? 1 : 0;
+            int32_t  out   = 0;
+            enum { Logic, Add, Sub, Rsb } kind = Logic;
+            switch (op4) {
+              case 0x0: out = vn & vm;  break;                              // AND / TST
+              case 0x1: out = vn & ~vm; break;                              // BIC
+              case 0x2: out = (rn == 15) ? vm : (vn | vm);   break;         // MOV / ORR
+              case 0x3: out = (rn == 15) ? ~vm : (vn | ~vm); break;         // MVN / ORN
+              case 0x4: out = vn ^ vm;  break;                              // EOR / TEQ
+              case 0x8: out = vn + vm;            kind = Add; break;        // ADD / CMN
+              case 0xa: out = vn + vm + cin;      kind = Add; break;        // ADC
+              case 0xb: out = vn - vm - (1 - cin); kind = Sub; break;       // SBC
+              case 0xd: out = vn - vm;            kind = Sub; break;        // SUB / CMP
+              case 0xe: out = vm - vn;            kind = Rsb; break;        // RSB
+              default:
+                fprintf(stderr, "VARAN-SIM: unimplemented T3 op4=0x%x (hw %04x %04x)\n", op4, hw0, hw1);
+                MOZ_CRASH("VARAN-SIM: unimplemented T3 data-processing op");
+            }
+            if (setCC) {
+                setNZFlags(out);
+                if (kind == Add) { setCFlag(carryFrom(vn, vm, (op4 == 0xa) ? cin : 0)); setVFlag(overflowFrom(out, vn, vm, true)); }
+                else if (kind == Sub) { setCFlag(!borrowFrom(vn, vm)); setVFlag(overflowFrom(out, vn, vm, false)); }
+                else if (kind == Rsb) { setCFlag(!borrowFrom(vm, vn)); setVFlag(overflowFrom(out, vm, vn, false)); }
+                else setCFlag(shco);   // logical ops: C = shifter carry-out, V unchanged
+            }
+            if (rd != 15)   // Rd == 15 => TST/TEQ/CMP/CMN: flags only, no writeback.
+                set_register(rd, out);
+        } else if (((hw0 & 0xfbf0) == 0xf240 || (hw0 & 0xfbf0) == 0xf2c0) && (hw1 & 0x8000u) == 0) {
+            // movw / movt (T3): imm16 = imm4:i:imm3:imm8. movw zero-extends; movt sets bits[31:16].
+            // NB the (hw1 & 0x8000)==0 guard is REQUIRED: a B<c>.W with cond=9(LS) has hw0=0xF240 and
+            // cond=11(LT) has hw0=0xF2C0, so their first halfword aliases the movw/movt mask. Branch
+            // second-halfwords always set hw1[15]=1 while movw/movt (hw1 = 0:imm3:Rd:imm8) always clear
+            // it, so this bit disambiguates cleanly (mirrors the modified-immediate guard just below).
+            bool isMovt = (hw0 & 0xfbf0) == 0xf2c0;
+            uint32_t imm16 = ((hw0 & 0xf) << 12) | (((hw0 >> 10) & 1) << 11) |
+                             (((hw1 >> 12) & 0x7) << 8) | (hw1 & 0xff);
+            uint32_t rd = (hw1 >> 8) & 0xf;
+            int32_t cur = get_register(rd);
+            set_register(rd, isMovt ? ((cur & 0xffff) | int32_t(imm16 << 16)) : int32_t(imm16));
+        } else if ((hw0 & 0xfa00u) == 0xf000u && (hw1 & 0x8000u) == 0) {
+            // T2 modified-immediate data-processing (Batch 1). Same op4/flag logic as the T3 register
+            // form, but the operand vm is ThumbExpandImm(control), control = i:imm3:imm8.
+            uint32_t op4   = (hw0 >> 5) & 0xf;
+            bool     setCC = (hw0 >> 4) & 1;
+            uint32_t rn    = hw0 & 0xf;
+            uint32_t rd    = (hw1 >> 8) & 0xf;
+            uint32_t control = (((hw0 >> 10) & 1) << 11) | (((hw1 >> 12) & 7) << 8) | (hw1 & 0xff);
+            uint32_t vm;
+            if (((control >> 10) & 3) == 0) {                    // pattern modes
+                uint32_t sel = (control >> 8) & 3, b = control & 0xff;
+                vm = (sel == 0) ? b
+                   : (sel == 1) ? (b | (b << 16))
+                   : (sel == 2) ? ((b << 8) | (b << 24))
+                   :              (b | (b << 8) | (b << 16) | (b << 24));
+            } else {                                             // rotation mode
+                uint32_t v = 0x80u | (control & 0x7f), r = (control >> 7) & 0x1f;
+                vm = (v >> r) | (v << (32 - r));
+            }
+            int32_t  vn  = (rn == 15) ? 0 : get_register(rn);    // Rn=15 => MOV/MVN
+            int      cin = c_flag_ ? 1 : 0;
+            int32_t  out = 0;
+            enum { Logic, Add, Sub, Rsb } kind = Logic;
+            switch (op4) {
+              case 0x0: out = vn & int32_t(vm);  break;                       // AND / TST
+              case 0x1: out = vn & ~int32_t(vm); break;                       // BIC
+              case 0x2: out = (rn == 15) ? int32_t(vm) : (vn | int32_t(vm));   break;   // MOV / ORR
+              case 0x3: out = (rn == 15) ? ~int32_t(vm) : (vn | ~int32_t(vm)); break;   // MVN / ORN
+              case 0x4: out = vn ^ int32_t(vm);  break;                       // EOR / TEQ
+              case 0x8: out = vn + int32_t(vm);            kind = Add; break;  // ADD / CMN
+              case 0xa: out = vn + int32_t(vm) + cin;      kind = Add; break;  // ADC
+              case 0xb: out = vn - int32_t(vm) - (1 - cin); kind = Sub; break; // SBC
+              case 0xd: out = vn - int32_t(vm);            kind = Sub; break;  // SUB / CMP
+              case 0xe: out = int32_t(vm) - vn;            kind = Rsb; break;  // RSB
+              default:
+                fprintf(stderr, "VARAN-SIM: unimplemented modimm op4=0x%x (hw %04x %04x)\n", op4, hw0, hw1);
+                MOZ_CRASH("VARAN-SIM: unimplemented modified-immediate data-processing op");
+            }
+            if (setCC) {
+                setNZFlags(out);
+                if (kind == Add) { setCFlag(carryFrom(vn, int32_t(vm), (op4 == 0xa) ? cin : 0)); setVFlag(overflowFrom(out, vn, int32_t(vm), true)); }
+                else if (kind == Sub) { setCFlag(!borrowFrom(vn, int32_t(vm))); setVFlag(overflowFrom(out, vn, int32_t(vm), false)); }
+                else if (kind == Rsb) { setCFlag(!borrowFrom(int32_t(vm), vn)); setVFlag(overflowFrom(out, int32_t(vm), vn, false)); }
+                // Logical ops: C = the modimm shifter carry; left unchanged here (validated per-op in tests).
+            }
+            if (rd != 15)   // Rd == 15 => TST/TEQ/CMP/CMN: flags only, no writeback.
+                set_register(rd, out);
+        } else if ((hw0 >> 9) == 0x76u || (hw0 >> 9) == 0x77u) {
+            // VFP near-copy (Batch 2): the T2 word is the A32 VFP word (cond forced AL) with the two
+            // halfwords swapped. Un-swap to reconstruct the A32 word and delegate to the base sim's
+            // proven A32 VFP decoder. Checked BEFORE branches (a VFP op on d8-d15 can set hw1[15]).
+            // arith/move/cvt/cmp/mrs/vimm and VLDR/VSTR + VFP block-transfer (vldm/vstm/vpush/vpop) all
+            // reach here; decodeType6 routes the load/store forms. None touches PC, so the trailing
+            // PC-advance below is correct.
+            uint32_t a32 = (uint32_t(hw0) << 16) | uint32_t(hw1);
+            SimInstruction* si = reinterpret_cast<SimInstruction*>(&a32);
+            if (((a32 >> 25) & 0x7u) == 6u)
+                decodeType6(si);   // full dispatch (VFP two-reg transfer / [deferred] load/store)
+            else
+                decodeType7(si);   // routes to decodeTypeVFP for cp10/11 data-proc/move/cvt/cmp/mrs
+        } else if ((hw0 >> 9) == 0x7cu) {
+            // T2 single LDR/STR/LDRB/STRB/LDRH/STRH/LDRSB/LDRSH (Batch 4; 0xf8xx/0xf9xx). hw0 = base |
+            // Rn: L=bit4, size=bits[6:5] (0 byte/1 half/2 word), signed=bit8, T3=bit7. hw1 = T3 imm12,
+            // or T4 (bit11) imm8+P/U/W, or register offset (Rt, shift[5:4], Rm).
+            bool load = (hw0 >> 4) & 1;
+            uint32_t szb = (hw0 >> 5) & 3, rn = hw0 & 0xf;
+            bool sgn = (hw0 >> 8) & 1, isT3 = (hw0 >> 7) & 1;
+            int32_t basev = get_register(rn);
+            uint32_t rt; int32_t addr; bool wb = false; int32_t wbval = 0;
+            if (isT3) {
+                rt = (hw1 >> 12) & 0xf; addr = basev + int32_t(hw1 & 0xfff);
+            } else if (hw1 & 0x800u) {                       // T4 imm8 + P/U/W
+                rt = (hw1 >> 12) & 0xf;
+                uint32_t P = (hw1 >> 10) & 1, U = (hw1 >> 9) & 1, W = (hw1 >> 8) & 1;
+                int32_t imm = U ? int32_t(hw1 & 0xff) : -int32_t(hw1 & 0xff);
+                addr = P ? (basev + imm) : basev;
+                if (W) { wb = true; wbval = basev + imm; }
+            } else {                                         // register offset
+                rt = (hw1 >> 12) & 0xf;
+                addr = basev + (int32_t(get_register(hw1 & 0xf)) << ((hw1 >> 4) & 3));
+            }
+            if (load) {
+                int32_t v = (szb == 2) ? readW(addr, instr, AllowUnaligned)
+                          : (szb == 1) ? (sgn ? int32_t(readH(addr, instr)) : int32_t(readHU(addr, instr)))
+                          :              (sgn ? int32_t(readB(addr)) : int32_t(readBU(addr)));
+                if (rt == 15)
+                    varanCheckInterworkTarget(v, "LDR pc");
+                set_register(rt, v);
+            } else {
+                int32_t v = get_register(rt);
+                if (szb == 2)      writeW(addr, v, instr, AllowUnaligned);
+                else if (szb == 1) writeH(addr, uint16_t(v & 0xffff), instr);
+                else               writeB(addr, uint8_t(v & 0xff));
+            }
+            if (wb) set_register(rn, wbval);
+        } else if ((hw0 >> 9) == 0x7du) {
+            // T2 data-proc register (Batch 2 bulk): mul/mla/mls/umull/smull/clz/sxtb/uxtb/sxth/uxth.
+            // Checked BEFORE branches (mul's hw1 top nibble is 0xF -> hw1[15]=1). Direct computation.
+            uint32_t hw0f0 = hw0 & 0xfff0u;
+            uint32_t rd = (hw1 >> 8) & 0xf, rm = hw1 & 0xf;
+            if (hw0f0 == 0xfb00u) {                       // mul / mla / mls
+                uint32_t rn = hw0 & 0xf, ra = (hw1 >> 12) & 0xf;
+                int32_t prod = int32_t(get_register(rn)) * int32_t(get_register(rm));
+                int32_t out = (ra == 0xf)              ? prod
+                            : (((hw1 >> 4) & 1) == 0)  ? int32_t(get_register(ra)) + prod   // mla
+                            :                            int32_t(get_register(ra)) - prod;  // mls
+                set_register(rd, out);
+            } else if (hw0f0 == 0xfba0u || hw0f0 == 0xfb80u) {   // umull / smull
+                uint32_t rn = hw0 & 0xf, rdlo = (hw1 >> 12) & 0xf;
+                uint64_t p = (hw0f0 == 0xfba0u)
+                    ? uint64_t(uint32_t(get_register(rn))) * uint64_t(uint32_t(get_register(rm)))
+                    : uint64_t(int64_t(int32_t(get_register(rn))) * int64_t(int32_t(get_register(rm))));
+                set_register(rdlo, int32_t(uint32_t(p)));
+                set_register(rd,   int32_t(uint32_t(p >> 32)));   // rd = RdHi
+            } else if (hw0f0 == 0xfab0u) {                // clz
+                uint32_t v = uint32_t(get_register(rm)), n = 0;
+                if (v == 0) n = 32; else while ((v & 0x80000000u) == 0) { n++; v <<= 1; }
+                set_register(rd, int32_t(n));
+            } else if ((hw0 & 0xff80u) == 0xfa00u && (hw1 >> 12) == 0xfu &&
+                       ((hw1 >> 4) & 0xfu) == 0u) {
+                // LSL/LSR/ASR/ROR (register) -- the 0x11d synth (EncodeShiftRegT2).
+                // hw0 = 0xFA00|(type<<5)|(S<<4)|Rn ; hw1 = 0xF000|(Rd<<8)|Rm.
+                // MUST precede the extend ops below: they share this hw0 band (sxth.w = 0xfa0f,
+                // uxth.w = 0xfa1f, sxtb.w = 0xfa4f, uxtb.w = 0xfa5f all satisfy
+                // (hw0 & 0xff80) == 0xfa00). The architectural discriminator is hw1[7:4]: 0 for a
+                // register shift, 0b10xx (rotate) for an extend -- confirmed against LLVM
+                // (lsl.w r0,r1,r2 -> hw1 0xF002 ; sxth.w r0,r1 -> hw1 0xF081).
+                uint32_t type = (hw0 >> 5) & 3, setcc = (hw0 >> 4) & 1;
+                uint32_t rnv = hw0 & 0xf, rdx = (hw1 >> 8) & 0xf, rmx = hw1 & 0xf;
+                uint32_t val = uint32_t(get_register(rnv));
+                uint32_t amt = uint32_t(get_register(rmx)) & 0xffu;   // ARM: low BYTE of Rs
+                bool shco = c_flag_;
+                uint32_t res;
+                switch (type) {
+                  case 0:                                                     // LSL
+                    if (amt == 0)       { res = val; }
+                    else if (amt < 32)  { shco = (val >> (32 - amt)) & 1; res = val << amt; }
+                    else if (amt == 32) { shco = val & 1; res = 0; }
+                    else                { shco = false; res = 0; }
+                    break;
+                  case 1:                                                     // LSR
+                    if (amt == 0)       { res = val; }
+                    else if (amt < 32)  { shco = (val >> (amt - 1)) & 1; res = val >> amt; }
+                    else if (amt == 32) { shco = (val >> 31) & 1; res = 0; }
+                    else                { shco = false; res = 0; }
+                    break;
+                  case 2:                                                     // ASR
+                    if (amt == 0)      { res = val; }
+                    else if (amt < 32) { shco = (val >> (amt - 1)) & 1;
+                                         res = uint32_t(int32_t(val) >> amt); }
+                    else               { shco = (val >> 31) & 1;
+                                         res = uint32_t(int32_t(val) >> 31); }
+                    break;
+                  default: {                                                  // ROR
+                    uint32_t a5 = amt & 0x1fu;
+                    if (amt == 0)     { res = val; }
+                    else if (a5 == 0) { shco = (val >> 31) & 1; res = val; }
+                    else              { shco = (val >> (a5 - 1)) & 1;
+                                        res = (val >> a5) | (val << (32 - a5)); }
+                    break;
+                  }
+                }
+                set_register(rdx, int32_t(res));
+                if (setcc) { setNZFlags(int32_t(res)); setCFlag(shco); }
+            } else if (hw0 == 0xfa4fu || hw0 == 0xfa5fu ||
+                       hw0 == 0xfa0fu || hw0 == 0xfa1fu) {   // sxtb/uxtb/sxth/uxth
+                uint32_t rot = ((hw1 >> 4) & 3) * 8;
+                uint32_t v = uint32_t(get_register(rm));
+                if (rot) v = (v >> rot) | (v << (32 - rot));
+                int32_t out = (hw0 == 0xfa4fu) ? int32_t(int8_t(v & 0xff))
+                            : (hw0 == 0xfa5fu) ? int32_t(v & 0xff)
+                            : (hw0 == 0xfa0fu) ? int32_t(int16_t(v & 0xffff))
+                            :                    int32_t(v & 0xffff);
+                set_register(rd, out);
+            } else {
+                // LOUD ELSE (Batch B item 5 -- closes the filed LEAD-2 hazard). This arm used to be
+                // the extend case's catch-all, so ANY unconverted 0x7d sibling (smlal/umlal,
+                // sxtab/uxtab with Rn != 15, the DSP multiplies) was SILENTLY executed as uxth --
+                // a wrong VALUE with no diagnostic. The blanket emit-time UDF net does not cover
+                // this: it only guards what the ASSEMBLER emits, not what the simulator decodes.
+                // Fail loud instead, and author a real case when such an encoder lands.
+                MOZ_CRASH("VARAN-SIM: unimplemented 0x7d data-proc-register form");
+            }
+        } else if ((hw0 >> 9) == 0x74u && ((hw0 >> 6) & 1) &&
+                   (((hw0 >> 8) & 1) || ((hw0 >> 5) & 1))) {
+            // (Mutation-tested 2026-07-22: dropping this term takes asm.js/testAtomics from
+            // rc=0 to rc=0xC0000005 -- the exclusive words execute as LDRD/STRD and fault.)
+            // ★ THE (P || W) TERM IS A CORRECTNESS FIX, NOT A TIGHTENING (sim-audit LEAD 1).
+            //
+            // Within `1110 100 P U 1 W L Rn`, load/store DUAL requires P==1 or W==1; P==0 && W==0
+            // is the load/store EXCLUSIVE + table-branch space. Every LDREX/STREX form we now emit
+            // (0xE84x/0xE85x/0xE8Cx/0xE8Dx) has bit6 SET, so without this term they were all
+            // claimed by the dual case and would have been executed as an LDRD/STRD -- two plain
+            // word accesses, no exclusive monitor, no diagnostic. That is silently wrong atomics:
+            // `Atomics.compareExchange` would appear to work and would simply never fail a
+            // contended CAS. The encoder half of A1 would have looked fine and the byte oracle
+            // could not have seen it.
+            //
+            // T1 LDRD/STRD (Batch 4). Shares the 0x74 dispatch with LDM/STM; hw0 bit6 discriminates
+            // (LDM/STM=0, dual=1). hw0 = 0xE840|(P<<8)|(U<<7)|(W<<5)|(L<<4)|Rn; hw1 = (Rt<<12)|(Rt2<<8)|imm8,
+            // imm8 scaled x4. Rt loads the lower word at addr, Rt2 the upper at addr+4.
+            uint32_t P = (hw0 >> 8) & 1, U = (hw0 >> 7) & 1, W = (hw0 >> 5) & 1;
+            uint32_t L = (hw0 >> 4) & 1, rn = hw0 & 0xf;
+            uint32_t rt = (hw1 >> 12) & 0xf, rt2 = (hw1 >> 8) & 0xf;
+            int32_t imm = int32_t((hw1 & 0xff) << 2);
+            int32_t basev = get_register(rn);
+            int32_t off = U ? imm : -imm;
+            int32_t addr = P ? (basev + off) : basev;
+            if (L) {
+                set_register(rt,  readW(addr,     instr, AllowUnaligned));
+                set_register(rt2, readW(addr + 4, instr, AllowUnaligned));
+            } else {
+                writeW(addr,     get_register(rt),  instr, AllowUnaligned);
+                writeW(addr + 4, get_register(rt2), instr, AllowUnaligned);
+            }
+            if (W) set_register(rn, basev + off);
+        } else if ((hw0 >> 9) == 0x74u && ((hw0 >> 6) & 1)) {
+            // ---- A1: load/store EXCLUSIVE (T32). P==0 && W==0 within the dual/exclusive space. ----
+            //
+            // Routed to the SAME exclusive-monitor helpers the A32 decoder uses (readEx*/writeEx*),
+            // which is the whole point: the monitor state, not the addressing, is what makes these
+            // instructions mean anything.
+            //   hw0[7:4]  0x5 LDREX     0x4 STREX     0xD LDREXB/H   0xC STREXB/H
+            //   hw1[7:4]  (byte/half forms)  0x4 byte   0x5 halfword
+            // LDREX/STREX carry an x4-scaled imm8; our encoders always emit 0, but decode it
+            // properly rather than assuming.
+            uint32_t rn = hw0 & 0xf;
+            uint32_t op = (hw0 >> 4) & 0xf;
+            uint32_t rt = (hw1 >> 12) & 0xf;
+            int32_t base = get_register(rn);
+            if (op == 0x5u) {                       // LDREX Rt, [Rn, #imm8*4]
+                int32_t addr = base + int32_t((hw1 & 0xff) << 2);
+                set_register(rt, readExW(addr, instr));
+            } else if (op == 0x4u) {                // STREX Rd, Rt, [Rn, #imm8*4]
+                uint32_t rd = (hw1 >> 8) & 0xf;
+                int32_t addr = base + int32_t((hw1 & 0xff) << 2);
+                set_register(rd, writeExW(addr, get_register(rt), instr));
+            } else if (op == 0xDu && ((hw1 >> 4) & 0xf) == 0x4u) {        // LDREXB
+                set_register(rt, readExBU(base));
+            } else if (op == 0xDu && ((hw1 >> 4) & 0xf) == 0x5u) {        // LDREXH
+                set_register(rt, readExHU(base, instr));
+            } else if (op == 0xCu && ((hw1 >> 4) & 0xf) == 0x4u) {        // STREXB
+                set_register(hw1 & 0xf, writeExB(base, uint8_t(get_register(rt))));
+            } else if (op == 0xCu && ((hw1 >> 4) & 0xf) == 0x5u) {        // STREXH
+                set_register(hw1 & 0xf, writeExH(base, uint16_t(get_register(rt)), instr));
+            } else {
+                // LOUD ELSE, same discipline as the 0x7d band: TBB/TBH and the doubleword
+                // exclusives (LDREXD/STREXD) share this space and we emit none of them. A silent
+                // catch-all here would execute an unconverted form as some other instruction.
+                MOZ_CRASH("VARAN-SIM: unimplemented load/store-exclusive or table-branch form");
+            }
+        } else if ((hw0 >> 9) == 0x74u) {
+            // T2 integer LDM/STM (Batch 3): IA (0xE8..) / DB (0xE9..). hw0 = base|(W<<5)|(L<<4)|Rn;
+            // hw1 = register mask. Lowest-numbered register <-> lowest address (DB starts n*4 below base).
+            bool isDB = (hw0 & 0x100u) != 0;
+            bool wb   = (hw0 & 0x20u) != 0;
+            bool load = (hw0 & 0x10u) != 0;
+            uint32_t rn = hw0 & 0xf, mask = hw1;
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < 16; i++) if (mask & (1u << i)) n++;
+            int32_t base = get_register(rn);
+            int32_t addr = isDB ? (base - int32_t(n) * 4) : base;
+            for (uint32_t i = 0; i < 16; i++) {
+                if (!(mask & (1u << i))) continue;
+                if (load) {
+                    int32_t lv = readW(addr, instr, AllowUnaligned);
+                    if (i == 15)
+                        varanCheckInterworkTarget(lv, "LDM{pc}");
+                    set_register(i, lv);
+                } else {
+                    writeW(addr, get_register(i), instr, AllowUnaligned);
+                }
+                addr += 4;
+            }
+            if (wb) set_register(rn, isDB ? (base - int32_t(n) * 4) : (base + int32_t(n) * 4));
+        } else if ((hw0 & 0xf800u) == 0xf000u && (hw1 & 0x8000u) &&
+                   ((hw1 & 0xd000u) == 0x9000u ||                       // T4 B.W
+                    (hw1 & 0xd000u) == 0xd000u ||                       // T1 BL
+                    ((hw1 & 0xd000u) == 0x8000u && ((hw0 >> 6) & 0xf) < 14))) {  // T3 B<c>.W
+            // P1.2b Group 2 direct branch. Reconstruct off = target-(branch+4); land at
+            // baseAddr+4+off. Formulas mirror BRANCH-ENCODING.md / DecodeBranchT2 exactly.
+            uint32_t sel = hw1 & 0xd000u;
+            bool isBL = (sel == 0xd000u);
+            bool taken = true;
+            int32_t off;
+            if (sel == 0x8000u) {
+                uint32_t cond = (hw0 >> 6) & 0xf;
+                uint32_t S = (hw0 >> 10) & 1, imm6 = hw0 & 0x3f;
+                uint32_t J1 = (hw1 >> 13) & 1, J2 = (hw1 >> 11) & 1, imm11 = hw1 & 0x7ff;
+                uint32_t v = (S << 19) | (J2 << 18) | (J1 << 17) | (imm6 << 11) | imm11;
+                off = int32_t(v << 12) >> 11;              // sign-extend 20-bit, then <<1
+                switch (cond) {
+                  case 0:  taken = z_flag_; break;                      case 1:  taken = !z_flag_; break;
+                  case 2:  taken = c_flag_; break;                      case 3:  taken = !c_flag_; break;
+                  case 4:  taken = n_flag_; break;                      case 5:  taken = !n_flag_; break;
+                  case 6:  taken = v_flag_; break;                      case 7:  taken = !v_flag_; break;
+                  case 8:  taken = c_flag_ && !z_flag_; break;          case 9:  taken = !c_flag_ || z_flag_; break;
+                  case 10: taken = (n_flag_ == v_flag_); break;         case 11: taken = (n_flag_ != v_flag_); break;
+                  case 12: taken = !z_flag_ && (n_flag_ == v_flag_); break;
+                  case 13: taken = z_flag_ || (n_flag_ != v_flag_); break;
+                  default: taken = true; break;
+                }
+            } else {
+                uint32_t S = (hw0 >> 10) & 1, imm10 = hw0 & 0x3ff;
+                uint32_t J1 = (hw1 >> 13) & 1, J2 = (hw1 >> 11) & 1, imm11 = hw1 & 0x7ff;
+                uint32_t I1 = (J1 ^ 1) ^ S, I2 = (J2 ^ 1) ^ S;
+                uint32_t v = (S << 23) | (I1 << 22) | (I2 << 21) | (imm10 << 11) | imm11;
+                off = int32_t(v << 8) >> 7;                // sign-extend 24-bit, then <<1
+            }
+            if (isBL)
+                set_register(lr, int32_t(baseAddr) + 4 + 1);   // Thumb return address (bit0 = 1)
+            if (taken) {
+                set_register(pc, int32_t(baseAddr) + 4 + off);
+                pc_modified_ = true;
+            }
+        } else if ((hw0 & 0xfbffu) == 0xf20fu && (hw1 & 0x8000u) == 0) {
+            // ADR (T3): `addw Rd, pc, #imm12` -> Rd = Align(PC,4) + imm12.
+            // hw0 = 0xF20F | (i << 10) ; hw1 = (imm3 << 12) | (Rd << 8) | imm8.
+            //
+            // Collision audit: the mask pins hw0 to 0xF20F/0xF60F (i in bit10), and hw1[15] == 0.
+            //   movw/movt : (hw0 & 0xfbf0) is 0xf200, neither 0xf240 nor 0xf2c0        -> no
+            //   modimm    : (hw0 & 0xfa00) is 0xf200, not 0xf000                        -> no
+            //   0x75/0x76/0x77/0x7c/0x7d/0x74 : hw0 >> 9 == 0x79                        -> no
+            //   branch/MRS/MSR/NOP.W/UDF : all require hw1[15] == 1 (or an exact word)   -> no
+            // get_register(pc) already returns the Thumb-2 Align(insn+4,4) (Batch A STEP 1a), so
+            // no extra alignment is applied here -- doing it twice would be the classic double-bias.
+            uint32_t imm12 = (((hw0 >> 10) & 1) << 11) | (((hw1 >> 12) & 7) << 8) | (hw1 & 0xff);
+            uint32_t rd = (hw1 >> 8) & 0xf;
+            set_register(rd, int32_t(uint32_t(get_register(pc)) + imm12));
+        } else if (hw0 == 0xf3efu && (hw1 & 0xf0ffu) == 0x8000u) {
+            // MRS <Rd>, APSR (T1). hw0 = 0xF3EF ; hw1 = 0x8000 | (Rd << 8).
+            //
+            // COLLISION AUDIT (this is the one genuinely NEW 32-bit decode case in Batch B, so it was
+            // audited against every earlier arm of this chain BEFORE being added):
+            //   movw/movt : (hw0 & 0xfbf0) is 0xf3e0 / 0xf380, neither 0xf240 nor 0xf2c0   -> no
+            //   modimm    : requires hw1[15] == 0; MRS/MSR both have hw1[15] == 1          -> no
+            //   0x76/0x77, 0x7c, 0x7d, 0x74 : hw0 >> 9 == 0x79 for both                    -> no
+            //   branch    : matches (hw0 & 0xf800)==0xf000 and hw1[15], and lands on the T3 arm
+            //               ((hw1 & 0xd000) == 0x8000) -- but that arm demands cond < 14, and the
+            //               cond field is 15 for MRS (0xF3EF) and 14 for MSR (0xF380|Rn). Excluded
+            //               EXACTLY because 14/15 are already reserved for NOP.W and UDF.
+            //   NOP.W     : exact-word test (0xf3af/0x8000)                                -> no
+            //   UDF       : (hw0 & 0xfff0) == 0xf7f0; MRS/MSR are 0xf3e0/0xf380            -> no
+            // So the case is collision-free and its placement in the chain is free; it sits here,
+            // next to the other cond-14/15 tenants it is disambiguated against.
+            uint32_t rd = (hw1 >> 8) & 0xf;
+            uint32_t apsr = (uint32_t(n_flag_) << 31) | (uint32_t(z_flag_) << 30) |
+                            (uint32_t(c_flag_) << 29) | (uint32_t(v_flag_) << 28);
+            set_register(rd, int32_t(apsr));
+        } else if ((hw0 & 0xfff0u) == 0xf380u && (hw1 & 0xf0ffu) == 0x8000u) {
+            // MSR APSR_<fields>, <Rn> (T1). hw0 = 0xF380 | Rn ; hw1 = 0x8000 | (mask << 8).
+            // Only the flag field (mask bit3, `nzcvq`) is modelled -- that is all this backend emits
+            // and all the simulator represents. A request to write any other field would be a silent
+            // no-op, so reject it loudly instead.
+            uint32_t rn = hw0 & 0xf, mask = (hw1 >> 8) & 0xf;
+            if (!(mask & 0x8u))
+                MOZ_CRASH("VARAN-SIM: MSR with no flag field -- unmodelled PSR write");
+            uint32_t v = uint32_t(get_register(rn));
+            n_flag_ = (v >> 31) & 1;
+            z_flag_ = (v >> 30) & 1;
+            c_flag_ = (v >> 29) & 1;
+            v_flag_ = (v >> 28) & 1;
+        } else if (hw0 == 0xf3afu && hw1 == 0x8000u) {
+            // NOP.W -- the reserved second slot of an in-range 2-slot conditional branch. No effect.
+        } else if (hw0 == 0xf3bfu && (hw1 & 0xff80u) == 0x8f00u &&
+                   (((hw1 >> 4) & 0xf) >= 0x4u && ((hw1 >> 4) & 0xf) <= 0x6u)) {
+            // A2: DMB (0x8F5x) / DSB (0x8F4x) / ISB (0x8F6x). Architecturally these order memory
+            // and flush the pipeline; the simulator executes one instruction at a time on one
+            // thread, so there is nothing to order -- they are correctly no-ops HERE and must not
+            // be mistaken for "unneeded" on device, where the cacheFlush path depends on them.
+            // Decoded explicitly rather than left to a catch-all so an unknown 0xF3BF form still
+            // fails loud.
+        } else if ((hw0 & 0xfff0) == 0xf7f0 && (hw1 & 0xf000) == 0xa000) {
+            uint32_t code = ((hw0 & 0xf) << 12) | (hw1 & 0xfff);
+            fprintf(stderr, "VARAN-SIM: UDF hit -- unconverted encoder gap: code=0x%03x (category=%u shape=%u op=%u)\n",
+                   code, (code >> 8) & 0xf, (code >> 4) & 0xf, code & 0xf);
+            ::VaranDumpUdfCensus();   // dump the emit-time census before we crash (the harvest data)
+            MOZ_CRASH("VARAN-SIM: executed a UDF (unconverted Thumb-2 encoder path)");
+        } else {
+            fprintf(stderr, "VARAN-SIM: unimplemented 32-bit Thumb-2 in the sim decoder: %04x %04x\n", hw0, hw1);
+            MOZ_CRASH("VARAN-SIM: unimplemented 32-bit Thumb-2 decode");
+        }
+    } else {
+        // 16-bit. BX/BLX Rm: 0100 0111 L Rm 000 => (hw0 & 0xff87) == 0x4700(BX,bit7=0)/0x4780(BLX,bit7=1).
+        if ((hw0 & 0xff87) == 0x4700) {
+            uint32_t rm = (hw0 >> 3) & 0xf;
+            varanCheckInterworkTarget(get_register(rm), "BX");
+            set_register(pc, get_register(rm));   // interworking; bit0 masked at the next fetch
+            pc_modified_ = true;
+        } else if ((hw0 & 0xff87) == 0x4780) {    // BLX Rm
+            uint32_t rm = (hw0 >> 3) & 0xf;
+            int32_t rmv = get_register(rm);
+            varanCheckInterworkTarget(rmv, "BLX");
+            // LR = address after this BLX16 + thumb bit. This BLX16 sits at slot+2 of the packed
+            // (blx16<<16)|NOP16 word, so LR = (slot+2)+2 + 1 = slot+4 + 1 = slot-end = the recorded
+            // call site (call(Register) records currentOffset()). Set LR BEFORE the branch (rm may==lr).
+            set_register(lr, int32_t(baseAddr) + 2 + 1);
+            set_register(pc, rmv);
+            pc_modified_ = true;
+        } else if (hw0 == 0xbf00) {                // NOP16 (the low half of a packed BX/BLX, or padding)
+            // no effect; the trailing pc-advance steps to baseAddr+2
+        } else if ((hw0 & 0xff00) == 0xbe00) {     // BKPT #imm8
+            fprintf(stderr, "VARAN-SIM: BKPT #%u hit\n", hw0 & 0xff);
+            MOZ_CRASH("VARAN-SIM: executed a BKPT");
+        } else {
+            fprintf(stderr, "VARAN-SIM: unimplemented 16-bit Thumb in the sim decoder: %04x\n", hw0);
+            MOZ_CRASH("VARAN-SIM: unimplemented 16-bit Thumb decode");
+        }
+    }
+
+    if (!pc_modified_)
+        set_register(pc, int32_t(baseAddr) + len);
+}
+#endif
 
 void
 Simulator::enable_single_stepping(SingleStepCallback cb, void* arg)

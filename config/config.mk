@@ -119,9 +119,14 @@ endif
 CONFIG_TOOLS	= $(MOZ_BUILD_ROOT)/config
 AUTOCONF_TOOLS	= $(MOZILLA_DIR)/build/autoconf
 
+# ARM32/UWP build spike: clang-cl defines _MSC_VER but does NOT need the cl.exe
+# -showIncludes action_cl wrapper (clang-cl emits deps natively), and the wrapper
+# cannot wrap its own compilation (chicken-and-egg -> "action_cl.exe: No such file").
 ifdef _MSC_VER
+ifndef CLANG_CL
 CC_WRAPPER ?= $(DEPTH)/config/action_cl$(BIN_SUFFIX)
 CXX_WRAPPER ?= $(DEPTH)/config/action_cl$(BIN_SUFFIX)
+endif # !CLANG_CL
 endif # _MSC_VER
 
 CC := $(CC_WRAPPER) $(CC)

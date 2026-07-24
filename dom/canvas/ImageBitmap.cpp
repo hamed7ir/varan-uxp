@@ -685,6 +685,9 @@ ImageBitmap::ToCloneData() const
   result->mPictureRect = mPictureRect;
   result->mIsPremultipliedAlpha = mIsPremultipliedAlpha;
   RefPtr<SourceSurface> surface = mData->GetAsSourceSurface();
+  // Varan (M4.1b): GetAsSourceSurface() can return null (alloc/map
+  // failure under memory pressure); MOZ_ASSERT below is a no-op in release.
+  if (NS_WARN_IF(!surface)) { return nullptr; }
   result->mSurface = surface->GetDataSurface();
   MOZ_ASSERT(result->mSurface);
   result->mWriteOnly = mWriteOnly;
@@ -1530,6 +1533,11 @@ ImageBitmap::WriteStructuredClone(JSStructuredCloneWriter* aWriter,
 
   RefPtr<SourceSurface> surface =
     aImageBitmap->mData->GetAsSourceSurface();
+  // Varan (M4.1b): GetAsSourceSurface() returns null on YCbCr->RGB
+  // alloc/map failure (plausible under memory pressure); guard before GetDataSurface().
+  if (NS_WARN_IF(!surface)) {
+    return false;
+  }
   RefPtr<DataSourceSurface> snapshot = surface->GetDataSurface();
   RefPtr<DataSourceSurface> dstDataSurface;
   {

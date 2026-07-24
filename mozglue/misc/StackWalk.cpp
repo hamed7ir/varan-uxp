@@ -851,6 +851,337 @@ MozDescribeCodeAddress(void* aPC, MozCodeAddressDetails* aDetails)
   return true;
 }
 
+#elif defined(_WIN32) && defined(_M_ARM) // {Varan} Windows ARM32 (Thumb-2) stack walk
+// The x86/x64 block above is x86-gated (defined(_M_IX86)||_M_AMD64||_M_IA64), so
+// ARM Windows fell through to the "unsupported platform" no-op at the bottom of this
+// file: MozStackWalk returned false and MozDescribeCodeAddress returned empty. Because
+// MozStackWalk is the backtrace producer on the assertion path
+// (nsDebugImpl.cpp -> nsTraceRefcnt::WalkTheStack -> MozStackWalk/MozDescribeCodeAddress),
+// EVERY assertion on ARM printed an EMPTY backtrace -- on the one platform Varan debugs.
+// This restores real C++ backtraces with the OS unwinder:
+//   * self-thread walk (aThread==0 && aPlatformData==0, the case every in-tree caller
+//     uses) -> RtlCaptureStackBackTrace (ntdll), the safe self-thread walker.
+//   * given-thread / given-CONTEXT walk -> RtlLookupFunctionEntry + RtlVirtualUnwind on
+//     the ARM .pdata/.xdata tables -- the same table-based scheme the _M_AMD64 arm uses
+//     above, retargeted to the ARM CONTEXT (Pc/Sp).
+//   * symbolization -> dbghelp SymFromAddr/SymGetLineFromAddr64 (arch-independent; this
+//     is the x86/x64 MozDescribeCodeAddress, copied verbatim -- mutually exclusive block,
+//     so no duplicate symbols).
+// Standalone device proof: D:\repo\varan-stackwalk\test\swtest.c exercises BOTH methods
+// + dbghelp; host-x64-proven (report<-c1<-c2<-c3<-main with real symbols + file:line);
+// ARMNT build dialect-gated (machine 0x1C4, Thumb-2 only, no A32).
+// PHASE-4 LIMITATION (walks C++ frames, NOT JIT frames): RtlLookupFunctionEntry returns
+// null for code with no .pdata (the JIT emits none yet) -> a JIT frame STOPS the walk,
+// exactly like the _M_AMD64 note above ("probably a JIT frame ... we have to give up").
+// Fix when the JIT lands: register unwind info via RtlAddGrowableFunctionTable.
+
+#include <windows.h>
+#include <dbghelp.h>
+#include <stdio.h>
+#include "mozilla/ArrayUtils.h"
+
+CRITICAL_SECTION gDbgHelpCS;
+static bool gDbgHelpCSInitialized = false;
+
+// Routine to print an error message to standard error. (mirror of the x86/x64 one)
+static void
+PrintError(const char* aPrefix)
+{
+  LPSTR lpMsgBuf;
+  DWORD lastErr = GetLastError();
+  FormatMessageA(
+    FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+    nullptr,
+    lastErr,
+    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+    (LPSTR)&lpMsgBuf,
+    0,
+    nullptr
+  );
+  fprintf(stderr, "### ERROR: %s: %s",
+          aPrefix, lpMsgBuf ? lpMsgBuf : "(null)\n");
+  fflush(stderr);
+  LocalFree(lpMsgBuf);
+}
+
+// Table-based unwind from a captured/given ARM CONTEXT (Method B). Used only for the
+// aThread / aPlatformData paths; the common self-thread path uses the simpler and safer
+// RtlCaptureStackBackTrace. NO dynamic alloca anywhere (clang-cl thumbv7 bug #5): a
+// fixed-size caller-supplied buffer is used.
+static uint32_t
+WalkStackTableARM(CONTEXT aContext, uint32_t aSkip,
+                  void** aPCs, uint32_t aMaxFrames)
+{
+  CONTEXT ctx = aContext;
+  uint32_t count = 0;
+  while (true) {
+    DWORD imageBase = 0;
+    PRUNTIME_FUNCTION runtimeFunction =
+      RtlLookupFunctionEntry((ULONG_PTR)ctx.Pc, &imageBase, nullptr);
+    if (!runtimeFunction) {
+      // No unwind info: a leaf without .pdata, or a JIT frame (none emitted yet).
+      // As on _M_AMD64, we have to give up here.
+      break;
+    }
+    PVOID dummyHandlerData;
+    DWORD dummyEstablisherFrame;
+    RtlVirtualUnwind(UNW_FLAG_NHANDLER,
+                     imageBase,
+                     ctx.Pc,
+                     runtimeFunction,
+                     &ctx,
+                     &dummyHandlerData,
+                     &dummyEstablisherFrame,
+                     nullptr);
+    if (ctx.Pc == 0) {
+      break;
+    }
+    if (aSkip > 0) {
+      --aSkip;
+      continue;
+    }
+    if (count < aMaxFrames) {
+      aPCs[count] = (void*)(uintptr_t)ctx.Pc;
+    }
+    ++count;
+    if (count >= aMaxFrames) {
+      break;
+    }
+  }
+  return count;
+}
+
+MFBT_API bool
+MozStackWalk(MozWalkStackCallback aCallback, uint32_t aSkipFrames,
+             uint32_t aMaxFrames, void* aClosure, uintptr_t aThread,
+             void* aPlatformData)
+{
+  StackWalkInitCriticalAddress();
+
+  // Fixed 1024-entry buffer (matches the x86/x64 path). NEVER a dynamic alloca
+  // (clang-cl thumbv7 bug #5: dynamic alloca forces a base pointer and corrupts
+  // co-located escaping frame objects).
+  void* pcs[1024];
+  const uint32_t kBufFrames = mozilla::ArrayLength(pcs);
+  uint32_t maxFrames = (aMaxFrames == 0 || aMaxFrames > kBufFrames) ? kBufFrames
+                                                                    : aMaxFrames;
+  uint32_t count = 0;
+
+  // A given aThread handle that actually refers to THIS thread must be treated as
+  // a self-walk: SuspendThread on our own thread self-deadlocks (ResumeThread never
+  // runs) and GetThreadContext on a running thread yields a meaningless context.
+  // (GetThreadId needs THREAD_QUERY_LIMITED_INFORMATION on the handle; a restricted
+  // handle to the current thread would miss this guard and self-suspend below. No
+  // in-tree caller passes its own handle here, so this is a defensive net only.)
+  bool walkSelf = !aThread && !aPlatformData;
+  if (aThread && !aPlatformData &&
+      ::GetThreadId(reinterpret_cast<HANDLE>(aThread)) == ::GetCurrentThreadId()) {
+    walkSelf = true;
+  }
+
+  if (walkSelf) {
+    // Common case: walk the calling thread. RtlCaptureStackBackTrace is ntdll's
+    // documented safe self-thread walker (internally the same table-based
+    // unwinder). FramesToSkip = aSkipFrames + 1 drops MozStackWalk's own frame.
+    USHORT n = RtlCaptureStackBackTrace(aSkipFrames + 1, (DWORD)maxFrames, pcs,
+                                        nullptr);
+    count = n;
+    if (count == 0) {
+      // RtlCaptureStackBackTrace produced nothing. Some Windows builds impose an
+      // internal FramesToSkip+FramesToCapture ceiling (the legacy XP/2003 "< 63"
+      // rule), and its RT/ARM32 behavior is device-unverifiable from an x64 host;
+      // a 0 here would otherwise reproduce the empty-backtrace bug this block
+      // fixes. Recover with the same .pdata table walk the given-thread path uses.
+      // RtlCaptureContext MUST be captured inline (not in a helper): a helper frame
+      // would be consumed by WalkStackTableARM's first unwind and shift every frame
+      // by one. Pass aSkipFrames (NOT +1): that first unwind already strips this
+      // MozStackWalk frame. Both walkers share the .pdata dependency, so this
+      // rescues the frame-count-cap case, not a missing-unwind-info (JIT) frame.
+      CONTEXT selfCtx;
+      memset(&selfCtx, 0, sizeof(selfCtx));
+      RtlCaptureContext(&selfCtx);
+      count = WalkStackTableARM(selfCtx, aSkipFrames, pcs, maxFrames);
+    }
+  } else if (aPlatformData) {
+    // NB: like the _M_AMD64 block, WalkStackTableARM stores each PC AFTER unwinding,
+    // so the entry PC of this CONTEXT (for a crash CONTEXT, the fault site itself) is
+    // NOT reported — its caller is frame 0. This is kept for x64 parity; do not add a
+    // store-before-first-unwind without matching the x64 path, or the two diverge.
+    CONTEXT ctx = *static_cast<CONTEXT*>(aPlatformData);
+    count = WalkStackTableARM(ctx, aSkipFrames, pcs, maxFrames);
+  } else {
+    // A different thread: suspend it, snapshot its CONTEXT, walk the tables (its
+    // current PC is likewise dropped by the unwind-first walk — x64 parity, as above).
+    HANDLE thread = reinterpret_cast<HANDLE>(aThread);
+    if (::SuspendThread(thread) == (DWORD)-1) {
+      PrintError("SuspendThread");
+      return false;
+    }
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.ContextFlags = CONTEXT_FULL;
+    BOOL ok = ::GetThreadContext(thread, &ctx);
+    ::ResumeThread(thread);
+    if (!ok) {
+      PrintError("GetThreadContext");
+      return false;
+    }
+    count = WalkStackTableARM(ctx, aSkipFrames, pcs, maxFrames);
+  }
+
+  uint32_t emitted = count < maxFrames ? count : maxFrames;
+  for (uint32_t i = 0; i < emitted; ++i) {
+    // SP is not tracked here (RtlCaptureStackBackTrace yields PC only); in-tree
+    // callbacks use the PC. Pass nullptr for SP.
+    (*aCallback)(i + 1, pcs[i], nullptr, aClosure);
+  }
+  return emitted != 0;
+}
+
+static BOOL CALLBACK
+callbackEspecial64(
+  PCSTR aModuleName,
+  DWORD64 aModuleBase,
+  ULONG aModuleSize,
+  PVOID aUserContext)
+{
+  BOOL retval = TRUE;
+  DWORD64 addr = *(DWORD64*)aUserContext;
+  const BOOL addressIncreases = TRUE;
+  if (addressIncreases
+      ? (addr >= aModuleBase && addr <= (aModuleBase + aModuleSize))
+      : (addr <= aModuleBase && addr >= (aModuleBase - aModuleSize))
+     ) {
+    retval = !!SymLoadModule64(GetCurrentProcess(), nullptr,
+                               (PSTR)aModuleName, nullptr,
+                               aModuleBase, aModuleSize);
+    if (!retval) {
+      PrintError("SymLoadModule64");
+    }
+  }
+  return retval;
+}
+
+#define NS_IMAGEHLP_MODULE64_SIZE (((offsetof(IMAGEHLP_MODULE64, LoadedPdbName) + sizeof(DWORD64) - 1) / sizeof(DWORD64)) * sizeof(DWORD64))
+
+BOOL SymGetModuleInfoEspecial64(HANDLE aProcess, DWORD64 aAddr,
+                                PIMAGEHLP_MODULE64 aModuleInfo,
+                                PIMAGEHLP_LINE64 aLineInfo)
+{
+  BOOL retval = FALSE;
+  aModuleInfo->SizeOfStruct = NS_IMAGEHLP_MODULE64_SIZE;
+  if (aLineInfo) {
+    aLineInfo->SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+  }
+  retval = SymGetModuleInfo64(aProcess, aAddr, aModuleInfo);
+  if (retval == FALSE) {
+    BOOL enumRes = EnumerateLoadedModules64(
+      aProcess,
+      (PENUMLOADED_MODULES_CALLBACK64)callbackEspecial64,
+      (PVOID)&aAddr);
+    if (enumRes != FALSE) {
+      retval = SymGetModuleInfo64(aProcess, aAddr, aModuleInfo);
+    }
+  }
+  if (retval != FALSE && aLineInfo) {
+    DWORD displacement = 0;
+    BOOL lineRes = FALSE;
+    lineRes = SymGetLineFromAddr64(aProcess, aAddr, &displacement, aLineInfo);
+    if (!lineRes) {
+      memset(aLineInfo, 0, sizeof(*aLineInfo));
+    }
+  }
+  return retval;
+}
+
+static bool
+EnsureSymInitialized()
+{
+  static bool gInitialized = false;
+  bool retStat;
+
+  if (gInitialized) {
+    return gInitialized;
+  }
+
+  if (!gDbgHelpCSInitialized) {
+    ::InitializeCriticalSection(&gDbgHelpCS);
+    gDbgHelpCSInitialized = true;
+  }
+
+  SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+  retStat = SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+  if (!retStat) {
+    PrintError("SymInitialize");
+  }
+
+  gInitialized = retStat;
+  /* XXX At some point we need to arrange to call SymCleanup */
+
+  return retStat;
+}
+
+MFBT_API bool
+MozDescribeCodeAddress(void* aPC, MozCodeAddressDetails* aDetails)
+{
+  aDetails->library[0] = '\0';
+  aDetails->loffset = 0;
+  aDetails->filename[0] = '\0';
+  aDetails->lineno = 0;
+  aDetails->function[0] = '\0';
+  aDetails->foffset = 0;
+
+  if (!EnsureSymInitialized()) {
+    return false;
+  }
+
+  HANDLE myProcess = ::GetCurrentProcess();
+  BOOL ok;
+
+  // debug routines are not threadsafe, so grab the lock.
+  EnterCriticalSection(&gDbgHelpCS);
+
+  DWORD64 addr = (DWORD64)(uintptr_t)aPC;
+  IMAGEHLP_MODULE64 modInfo;
+  IMAGEHLP_LINE64 lineInfo;
+  BOOL modInfoRes;
+  modInfoRes = SymGetModuleInfoEspecial64(myProcess, addr, &modInfo, &lineInfo);
+
+  if (modInfoRes) {
+    strncpy(aDetails->library, modInfo.LoadedImageName,
+                sizeof(aDetails->library));
+    aDetails->library[mozilla::ArrayLength(aDetails->library) - 1] = '\0';
+    aDetails->loffset = (char*)aPC - (char*)modInfo.BaseOfImage;
+
+    if (lineInfo.FileName) {
+      strncpy(aDetails->filename, lineInfo.FileName,
+                  sizeof(aDetails->filename));
+      aDetails->filename[mozilla::ArrayLength(aDetails->filename) - 1] = '\0';
+      aDetails->lineno = lineInfo.LineNumber;
+    }
+  }
+
+  ULONG64 buffer[(sizeof(SYMBOL_INFO) +
+    MAX_SYM_NAME * sizeof(TCHAR) + sizeof(ULONG64) - 1) / sizeof(ULONG64)];
+  PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)buffer;
+  pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+  pSymbol->MaxNameLen = MAX_SYM_NAME;
+
+  DWORD64 displacement;
+  ok = SymFromAddr(myProcess, addr, &displacement, pSymbol);
+
+  if (ok) {
+    strncpy(aDetails->function, pSymbol->Name,
+                sizeof(aDetails->function));
+    aDetails->function[mozilla::ArrayLength(aDetails->function) - 1] = '\0';
+    aDetails->foffset = static_cast<ptrdiff_t>(displacement);
+  }
+
+  LeaveCriticalSection(&gDbgHelpCS); // release our lock
+  return true;
+}
+// {Varan} ---- end Windows ARM32 stack walking ----
+
 // i386 or PPC Linux stackwalking code
 #elif HAVE_DLADDR && (HAVE__UNWIND_BACKTRACE || MOZ_STACKWALK_SUPPORTS_LINUX || MOZ_STACKWALK_SUPPORTS_MACOSX)
 

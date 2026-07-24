@@ -107,9 +107,16 @@ extern "C" {
 
 // The intrinsics currently cause compiler errors with arm-nacl-gcc and the
 // inline assembly would need to be modified for use with Native Client.
+// Varan: clang-cl --target=thumbv7-...-msvc defines __ARM_NEON__ (Windows-on-ARM
+// guarantees NEON) and this build has no config.h, so this block force-enables WEBP_USE_NEON on
+// Win-ARM even though the moz.build gate (BUILD_ARM_NEON='') never compiles the *_neon.c sources ->
+// the dsp dispatch calls VP8*DspInitNEON/WebPInit*NEON with no definition -> link undefined. Exclude
+// the Win-ARM32 (_M_ARM) MSVC path here unless moz.build explicitly opts in via WEBP_HAVE_NEON; the
+// _M_ARM/_M_ARM64 MSVC decision is centralized in the _MSC_VER block just below.
 #if ((defined(__ARM_NEON__) || defined(__aarch64__)) && \
      (!defined(HAVE_CONFIG_H) || defined(WEBP_HAVE_NEON))) && \
-    !defined(__native_client__)
+    !defined(__native_client__) && \
+    !(defined(_MSC_VER) && defined(_M_ARM) && !defined(WEBP_HAVE_NEON))
 #define WEBP_USE_NEON
 #endif
 
@@ -122,8 +129,14 @@ extern "C" {
 // Note: ARM64 is supported in Visual Studio 2017, but requires the direct
 // inclusion of arm64_neon.h; Visual Studio 2019 includes this file in
 // arm_neon.h.
+// Varan: require WEBP_HAVE_NEON on the _M_ARM (32-bit) path. clang-cl sets
+// _MSC_VER + _M_ARM, so this block otherwise force-enables WEBP_USE_NEON for Win-ARM even
+// though the moz.build gate (BUILD_ARM_NEON, empty here) never adds the *_neon.c sources ->
+// the dsp dispatch calls WebPInit*NEON with no definition -> link undefined. Gating on
+// WEBP_HAVE_NEON (defined by the moz.build ONLY when it opts into NEON) keeps the header and
+// the source list consistent: NEON-off Win-ARM builds use the portable C dsp.
 #if defined(_MSC_VER) && \
-  ((_MSC_VER >= 1700 && defined(_M_ARM)) || \
+  ((_MSC_VER >= 1700 && defined(_M_ARM) && defined(WEBP_HAVE_NEON)) || \
    (_MSC_VER >= 1920 && defined(_M_ARM64)))
 #define WEBP_USE_NEON
 #define WEBP_USE_INTRINSICS

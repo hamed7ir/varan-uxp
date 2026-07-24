@@ -110,7 +110,15 @@ JxlThreadParallelRunner
 JxlThreadParallelRunnerCreate
 JxlThreadParallelRunnerDestroy
 JxlThreadParallelRunnerDefaultNumWorkerThreads
-#ifdef MOZ_VORBIS
+# Varan: this build is MOZ_TREMOR (integer Vorbis decoder), not MOZ_VORBIS
+# (floating-point libvorbis). Tremor + libogg (both in gkmedias) provide the ogg_* container API
+# and the vorbis DECODE API under the same symbol names, and xul references them, but this block
+# was guarded on MOZ_VORBIS only -> gkmedias.dll did not export them -> xul.dll link undefined
+# (ogg_*/vorbis_synthesis_*/...). Export the ogg_* + vorbis-decode symbols under MOZ_TREMOR too;
+# keep the vorbis ENCODE symbols (vorbis_analysis*/vorbis_comment_add_tag/vorbis_encode_init_vbr,
+# which Tremor does NOT define -- verified via llvm-nm of the ogg/tremor objects) under MOZ_VORBIS
+# only, so a Tremor build never exports an undefined symbol (which would break the gkmedias link).
+#if defined(MOZ_VORBIS) || defined(MOZ_TREMOR)
 ogg_page_bos
 ogg_page_granulepos
 ogg_page_serialno
@@ -131,19 +139,11 @@ ogg_sync_init
 ogg_sync_pageseek
 ogg_sync_reset
 ogg_sync_wrote
-vorbis_analysis
-vorbis_analysis_blockout
-vorbis_analysis_buffer
-vorbis_analysis_init
-vorbis_analysis_headerout
-vorbis_analysis_wrote
 vorbis_block_clear
 vorbis_block_init
-vorbis_comment_add_tag
 vorbis_comment_clear
 vorbis_comment_init
 vorbis_dsp_clear
-vorbis_encode_init_vbr
 vorbis_info_clear
 vorbis_info_init
 vorbis_packet_blocksize
@@ -155,9 +155,22 @@ vorbis_synthesis_pcmout
 vorbis_synthesis_read
 vorbis_synthesis_restart
 #endif
+#ifdef MOZ_VORBIS
+vorbis_analysis
+vorbis_analysis_blockout
+vorbis_analysis_buffer
+vorbis_analysis_init
+vorbis_analysis_headerout
+vorbis_analysis_wrote
+vorbis_comment_add_tag
+vorbis_encode_init_vbr
+#endif
 moz_speex_resampler_init
 moz_speex_resampler_destroy
 moz_speex_resampler_process_float
+; Varan: export moz_speex_resampler_process_int too (defined in the speex objects,
+; referenced by xul, but omitted from this list upstream) -> otherwise xul.dll link undefined.
+moz_speex_resampler_process_int
 moz_speex_resampler_process_interleaved_float
 moz_speex_resampler_process_interleaved_int
 moz_speex_resampler_set_rate
@@ -208,12 +221,21 @@ opus_decoder_destroy
 opus_decoder_ctl
 opus_decoder_get_nb_samples
 opus_decode
+; Varan: the opus float API (opus_*_float) is compiled only when
+; MOZ_SAMPLE_TYPE_FLOAT32 is set (libopus/moz.build:56 -> DISABLE_FLOAT_API otherwise).
+; This is a MOZ_SAMPLE_TYPE_S16 build, so exporting these from the gkmedias .def forces
+; a <root> reference to a symbol that was never compiled -> lld-link undefined. Gate the
+; export on the same condition that compiles it.
+#ifdef MOZ_SAMPLE_TYPE_FLOAT32
 opus_decode_float
+#endif
 opus_get_version_string
 opus_multistream_decoder_create
 opus_multistream_decoder_ctl
 opus_multistream_decoder_destroy
+#ifdef MOZ_SAMPLE_TYPE_FLOAT32
 opus_multistream_decode_float
+#endif
 opus_multistream_decode
 opus_packet_get_nb_frames
 opus_packet_get_samples_per_frame
@@ -221,7 +243,9 @@ opus_encoder_create
 opus_encoder_destroy
 opus_encoder_ctl
 opus_encode
+#ifdef MOZ_SAMPLE_TYPE_FLOAT32
 opus_encode_float
+#endif
 #ifdef MOZ_WEBRTC
 opus_custom_mode_create
 opus_packet_parse

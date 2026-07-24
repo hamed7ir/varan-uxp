@@ -14,6 +14,12 @@
 #endif
 #if defined(_ARM64_)
 #include "config_win64_aarch64.h"
+#elif defined(_M_ARM) || defined(_ARM_)
+/* Varan: Windows ARM32 (Thumb-2). Generic C ffvpx -- ARCH_X86=0 (the
+   x86 fallthrough would leave ff_*_x86 undefined at link) and ARCH_ARM=0 / all SIMD off
+   (NEON .S is A32, forbidden on Win RT). config/moz.build add no arch dir (FFVPX_ASFLAGS
+   is empty on ARM). */
+#include "config_win32_arm.h"
 #else
 #if defined(HAVE_64BIT_BUILD)
 #include "config_win64.h"

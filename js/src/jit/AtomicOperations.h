@@ -342,6 +342,12 @@ AtomicOperations::isLockfree(int32_t size)
 #  include "jit/none/AtomicOperations-ppc.h"
 # elif defined(__aarch64__)
 #  include "jit/arm64/AtomicOperations-arm64.h"
+# elif defined(_M_ARM) || defined(__arm__)
+   // Varan: interpreter-only ARM32 (--disable-ion) is an EXECUTED
+   // JS_CODEGEN_NONE build; the all-MOZ_CRASH none backend below would fire on the
+   // generic typed-array [[Set]]/[[Get]] path + Atomics.*.  Use compiler-realized
+   // atomics (clang __atomic_*), per this block's own comment above.
+#  include "jit/none/AtomicOperations-none-arm.h"
 # else
 #  include "jit/none/AtomicOperations-none.h" // These MOZ_CRASH() always
 # endif

@@ -5,12 +5,18 @@
 
 #include "jit/arm/Architecture-arm.h"
 
-#if !defined(JS_SIMULATOR_ARM) && !defined(__APPLE__)
+#if !defined(JS_SIMULATOR_ARM) && !defined(__APPLE__) && !defined(XP_WIN)
+// Varan M1: elf.h is Unix-only (Linux auxv path); Windows uses the hardcoded
+// CPU-feature profile in InitARMFlags() instead.
 #include <elf.h>
 #endif
 
+#if !defined(XP_WIN)
+// Varan M1: Unix-only headers for the Linux /proc feature-detection path
+// (open/read); Windows uses the hardcoded profile in InitARMFlags().
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 #include "jit/arm/Assembler-arm.h"
 #include "jit/RegisterSets.h"
@@ -205,7 +211,12 @@ InitARMFlags()
     // HWCAP_FIXUP_FAULT is on by default even if HWCAP_ALIGNMENT_FAULT is
     // not on by default, because some memory access instructions always fault.
     // Notably, this is true for floating point accesses.
-    flags = HWCAP_ARMv7 | HWCAP_VFP | HWCAP_VFPv3 | HWCAP_VFPv4 | HWCAP_NEON | HWCAP_IDIVA
+    // Match the device profile (Surface RT = Tegra 3 / Cortex-A9, see the _M_ARM block below):
+    // NO hardware integer divide -- Cortex-A9 lacks sdiv/udiv, so `%` / `/` must use the software
+    // path, NOT an inline udiv/sdiv (which the device would fault on and the Thumb-2 encoder does
+    // not emit). Dropping HWCAP_IDIVA here makes the simulator faithful to the device. (HWCAP_VFPv4
+    // vs the device's VFPv3 remains a separate faithfulness item -- Cortex-A9 has no VFMA.)
+    flags = HWCAP_ARMv7 | HWCAP_VFP | HWCAP_VFPv3 | HWCAP_VFPv4 | HWCAP_NEON
           | HWCAP_FIXUP_FAULT;
 #else
 
@@ -251,6 +262,15 @@ InitARMFlags()
         if (exynos7420)
             forceDoubleCacheFlush = true;
     }
+#endif
+
+#if defined(_M_ARM) && !defined(__linux__)
+    // Varan M1: Windows has no /proc/self/auxv or /proc/cpuinfo. Hardcode the
+    // smoke target's CPU profile -- Surface RT = NVIDIA Tegra 3 (Cortex-A9, ARMv7):
+    // VFPv3 + NEON + 32 VFP registers, but DELIBERATELY NO hardware integer divide
+    // (Cortex-A9 lacks sdiv/udiv; emitting idiv would fault ONLY on the device -- the
+    // worst failure mode, so be conservative). Overridable at runtime via ARMHWCAP.
+    flags = HWCAP_ARMv7 | HWCAP_VFP | HWCAP_VFPv3 | HWCAP_NEON | HWCAP_VFPD32;
 #endif
 
     // If compiled to use specialized features then these features can be

@@ -837,7 +837,10 @@ WinUtils::GetRegistryKey(HKEY aRoot,
     return false;
   }
   if (aBuffer) {
-    aBuffer[aBufferLength / sizeof(*aBuffer) - 1] = 0;
+    // Varan (M4.1b): a 0-byte REG_SZ makes aBufferLength 0, so
+    // aBufferLength/sizeof(*aBuffer)-1 underflows (unsigned) to an OOB write.
+    DWORD chars = aBufferLength / sizeof(*aBuffer);
+    aBuffer[chars ? chars - 1 : 0] = 0;
   }
   return true;
 }
@@ -1861,8 +1864,11 @@ IsWindows10TabletMode()
   return isInTabletMode;
 }
 
+// Varan: renamed from GetAutoRotationState -- the SDK 10.0.19041 winuser.h
+// declares GetAutoRotationState, so on ARM (clang-cl) the unqualified call below became
+// ambiguous between this local GetProcAddress shim and the SDK prototype.
 static bool
-GetAutoRotationState(AR_STATE* aRotationState)
+MozGetAutoRotationState(AR_STATE* aRotationState)
 {
   typedef BOOL (WINAPI* GetAutoRotationStateFunc)(PAR_STATE pState);
   static GetAutoRotationStateFunc get_auto_rotation_state_func =
@@ -1905,7 +1911,7 @@ IsTabletDevice()
   // a convertible or a detachable. See:
   // https://msdn.microsoft.com/en-us/library/windows/desktop/dn629263(v=vs.85).aspx
   AR_STATE rotation_state;
-  if (GetAutoRotationState(&rotation_state) &&
+  if (MozGetAutoRotationState(&rotation_state) &&
       ((rotation_state & AR_NOT_SUPPORTED) || (rotation_state & AR_LAPTOP) ||
        (rotation_state & AR_NOSENSOR))) {
     return false;

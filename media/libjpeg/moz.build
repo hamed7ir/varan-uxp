@@ -70,7 +70,41 @@ SOURCES += [
 if CONFIG['LIBJPEG_TURBO_USE_YASM']:
     USE_YASM = True
 
-if CONFIG['LIBJPEG_TURBO_ASFLAGS']:
+# Varan (M4.2 Stage D, 2026-07-19): Windows-on-ARM (thumbv7-windows-msvc)
+# libjpeg-turbo NEON via the PURE-C intrinsics ONLY. Placed as the FIRST branch (before the
+# LIBJPEG_TURBO_ASFLAGS gate, which old-configure.in leaves EMPTY for WINNT:arm -> otherwise the
+# `else` would add jsimd_none.c AND we'd add jsimd.c -> duplicate jsimd_can_* symbols). This
+# branch REPLACES the aarch32 SOURCES set: it DROPS the A32 `simd/arm/aarch32/jsimd_neon.S`
+# (dialect-forbidden on Win RT) and ADDS the 3 C twins it used to provide -- jccolor-neon.c
+# (the 6 ext*_ycc_convert), jidctint-neon.c (jsimd_idct_islow_neon, the HOT decode path),
+# jidctfst-neon.c (jsimd_idct_ifast_neon). All ~47 jsimd_*_neon symbols aarch32/jsimd.c calls
+# are then defined by these 15 C files (verified: 0 S-only symbols, nothing lost). WITH_SIMD=1
+# (jconfig.h:57) so the codec dispatches through jsimd.c. No -mfpu=neon (clang-cl rejects it;
+# thumbv7-windows-msvc has NEON by default). jsimd.c reads NO /proc/cpuinfo (guarded by
+# __ARM_NEON__ -> assumes NEON, correct for WoA). PER-LIBRARY ONLY (global BUILD_ARM_NEON stays '').
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] == 'WINNT':
+    LOCAL_INCLUDES += [
+        '/media/libjpeg/simd/arm',
+        '/media/libjpeg/simd/arm/aarch32',
+    ]
+    SOURCES += [
+        'simd/arm/aarch32/jchuff-neon.c',
+        'simd/arm/aarch32/jsimd.c',
+        'simd/arm/jccolor-neon.c',
+        'simd/arm/jcgray-neon.c',
+        'simd/arm/jcphuff-neon.c',
+        'simd/arm/jcsample-neon.c',
+        'simd/arm/jdcolor-neon.c',
+        'simd/arm/jdmerge-neon.c',
+        'simd/arm/jdsample-neon.c',
+        'simd/arm/jfdctfst-neon.c',
+        'simd/arm/jfdctint-neon.c',
+        'simd/arm/jidctfst-neon.c',
+        'simd/arm/jidctint-neon.c',
+        'simd/arm/jidctred-neon.c',
+        'simd/arm/jquanti-neon.c',
+    ]
+elif CONFIG['LIBJPEG_TURBO_ASFLAGS']:
     if CONFIG['CPU_ARCH'] == 'arm':
         LOCAL_INCLUDES += [
             '/media/libjpeg/simd/arm',

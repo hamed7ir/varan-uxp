@@ -1029,6 +1029,14 @@ struct AssemblerBufferWithConstantPools : public AssemblerBuffer<SliceSize, Inst
         finishPool();
     }
 
+    // Varan: query whether a no-pool region is already open.
+    // enterNoPool() is deliberately NOT re-entrant (see its assert), so an emitter that
+    // wants to open its own region must be able to ask first. Read-only, no behaviour
+    // change for any other backend.
+    bool inNoPoolRegion() const {
+        return canNotPlacePool_;
+    }
+
     void enterNoPool(size_t maxInst) {
         // Don't allow re-entry.
         MOZ_ASSERT(!canNotPlacePool_);

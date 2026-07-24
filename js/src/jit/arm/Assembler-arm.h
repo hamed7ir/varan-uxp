@@ -445,10 +445,13 @@ class Reg
     // The "second register".
     uint32_t rm_ : 4;
     // Do we get another register for shifting.
-    bool rrs_ : 1;
-    ShiftType type_ : 2;
-    // We'd like this to be a more sensible encoding, but that would need to be
-    // a struct and that would not pack :(
+    // ARM32/UWP build spike: declare these as uint32_t (not bool / ShiftType enum) so
+    // clang-cl's MSVC-style bitfield layout packs them into ONE 32-bit unit the way
+    // GCC/Clang do. With mixed underlying types MSVC starts a new storage unit per type,
+    // bloating sizeof(Reg) and breaking `sizeof(Op2Reg)==sizeof(Reg)` (the memcpy relies
+    // on it). Values are unchanged (rrs_ is 0/1; type_ holds a 2-bit ShiftType).
+    uint32_t rrs_ : 1;
+    uint32_t type_ : 2;
     uint32_t shiftAmount_ : 5;
     uint32_t pad_ : 20;
 
@@ -472,6 +475,37 @@ class Reg
 // Op2 has a mode labelled "<imm8m>", which is arm's magical immediate encoding.
 // Some instructions actually get 8 bits of data, which is called Imm8Data
 // below. These should have edit distance > 1, but this is how it is for now.
+#if defined(VARAN_THUMB2)
+// Thumb-2: carry the 12-bit ThumbExpandImm control (i:imm3:imm8), NOT the A32 (data,rot). encode()
+// returns that control unchanged; the as_alu seam pulls i/imm3/imm8 straight from it. Built only by
+// Imm8::EncodeImm (via ThumbModImmControl). Representation change is contained -- no site reads the
+// old data_/rot_ directly.
+class Imm8mData
+{
+    uint32_t ctrl_ : 12;
+    uint32_t buff_ : 19;
+    uint32_t invalid_ : 1;  // uint32_t (not bool) so clang-cl packs it into the bitfield unit
+
+  public:
+    // Default constructor makes an invalid immediate.
+    Imm8mData()
+      : ctrl_(0xfff), buff_(0), invalid_(true)
+    { }
+
+    explicit Imm8mData(uint32_t control)
+      : ctrl_(control & 0xfff), buff_(0), invalid_(false)
+    {
+        MOZ_ASSERT((control & ~0xfffu) == 0);
+    }
+
+    bool invalid() const { return invalid_; }
+
+    uint32_t encode() const {
+        MOZ_ASSERT(!invalid_);
+        return ctrl_;
+    };
+};
+#else
 class Imm8mData
 {
     uint32_t data_ : 8;
@@ -481,7 +515,7 @@ class Imm8mData
     // Throw in an extra bit that will be 1 if we can't encode this properly.
     // if we can encode it properly, a simple "|" will still suffice to meld it
     // into the instruction.
-    bool invalid_ : 1;
+    uint32_t invalid_ : 1;  // ARM32/UWP spike: uint32_t (not bool) so clang-cl packs it into the preceding uint32_t bitfield unit
 
   public:
     // Default constructor makes an invalid immediate.
@@ -503,6 +537,7 @@ class Imm8mData
         return data_ | (rot_ << 8);
     };
 };
+#endif
 
 class Imm8Data
 {
@@ -601,7 +636,7 @@ class RIS
 
 class RRS
 {
-    bool mustZero_ : 1;
+    uint32_t mustZero_ : 1;  // ARM32/UWP spike: uint32_t (not bool) so clang-cl packs it into the preceding uint32_t bitfield unit
     // The register that holds the shift amount.
     uint32_t rs_ : 4;
 
@@ -619,6 +654,28 @@ class RRS
 
 } // namespace datastore
 
+#if defined(VARAN_THUMB2)
+// Thumb-2 ThumbExpandImm control (imm12 = i:imm3:imm8) that encodes K, or -1 if K is not
+// modified-immediate-encodable (-> caller falls back to the already-converted movw/movt). Two DISJOINT
+// families (ARMv7-M ARM A6.3.2): four repeated-byte pattern modes (00 zero-extend 0x000000XY -- the only
+// encoding of 0..255; 01 0x00XY00XY; 10 0xXY00XY00; 11 0xXYXYXYXY, XY!=0) and a rotation mode
+// {ROR(v, r): v in [0x80,0xFF], r in [8,31]}. NOT the A32 imm8m set -- feeding an A32 (data,rot) field to
+// a T2 decoder silently emits the WRONG constant (0xC01 -> 0x00008100). Independently oracle-verified vs
+// clang thumbv7 (24/24 boundary encodable byte-match + 4/4 rejects; ENCODING-TABLES-SYNTHESIS.md Batch 1).
+static inline int32_t ThumbModImmControl(uint32_t K) {
+    if (K <= 0xFF) return int32_t(K);                                       // 00: zero-extend
+    uint32_t b0 = K & 0xFF, b1 = (K >> 8) & 0xFF, b2 = (K >> 16) & 0xFF, b3 = (K >> 24) & 0xFF;
+    if (b3 == 0 && b1 == 0 && b0 == b2 && b0)   return int32_t(0x100u | b0);   // 01: 0x00XY00XY
+    if (b0 == 0 && b2 == 0 && b1 == b3 && b1)   return int32_t(0x200u | b1);   // 10: 0xXY00XY00
+    if (b0 == b1 && b1 == b2 && b2 == b3 && b0) return int32_t(0x300u | b0);   // 11: 0xXYXYXYXY
+    for (uint32_t rot = 8; rot < 32; rot++) {                               // rotation: unrotated 0x80..0xFF
+        uint32_t unrot = (K << rot) | (K >> (32 - rot));                    // rol(K,rot) undoes ROR(.,rot)
+        if (unrot <= 0xFF && (unrot & 0x80)) return int32_t((rot << 7) | (unrot & 0x7F));
+    }
+    return -1;
+}
+#endif
+
 class MacroAssemblerARM;
 class Operand;
 
@@ -629,7 +686,7 @@ class Operand2
     friend class InstALU;
 
     uint32_t oper_ : 31;
-    bool invalid_ : 1;
+    uint32_t invalid_ : 1;  // ARM32/UWP spike: uint32_t (not bool) so clang-cl packs it into the preceding uint32_t bitfield unit
 
   protected:
     explicit Operand2(datastore::Imm8mData base)
@@ -676,6 +733,14 @@ class Imm8 : public Operand2
     { }
 
     static datastore::Imm8mData EncodeImm(uint32_t imm) {
+#if defined(VARAN_THUMB2)
+        // Thumb-2 modified-immediate (NOT A32 imm8m). Carry the 12-bit ThumbExpandImm control; -1 ->
+        // invalid -> the ma_* cascade falls through to the converted movw/movt.
+        int32_t control = ThumbModImmControl(imm);
+        if (control < 0)
+            return datastore::Imm8mData();
+        return datastore::Imm8mData(uint32_t(control));
+#else
         // RotateLeft below may not be called with a shift of zero.
         if (imm <= 0xFF)
             return datastore::Imm8mData(imm, 0);
@@ -688,6 +753,7 @@ class Imm8 : public Operand2
                 return datastore::Imm8mData(rotimm, rot);
         }
         return datastore::Imm8mData();
+#endif
     }
 
     // Pair template?
@@ -959,6 +1025,60 @@ class VFPImm
 // A BOffImm is an immediate that is used for branches. Namely, it is the offset
 // that will be encoded in the branch instruction. This is the only sane way of
 // constructing a branch.
+#if defined(VARAN_THUMB2)
+// P1.2b Group 2 branch bridge (defined in Assembler-arm.cpp). isBL/condField(0..14, 14=AL) pick
+// T1/T4/T3; byteVal is the branch's execution distance / chain-link value. See BRANCH-ENCODING.md.
+uint32_t VaranEncodeBranchInst(bool isBL, int32_t byteVal, uint32_t condField);
+int32_t  VaranDecodeBranchByteVal(uint32_t word);           // inverse; sentinel if not a branch
+bool     VaranDecodeBranchCond(uint32_t word, uint32_t* condField); // cond 0..14, false if not a branch
+int      VaranBranchKind(uint32_t word);                    // 0 not-a-branch, 1 B (T4/T3), 2 BL (T1)
+// Chain-tail sentinel carried in an unbound forward branch's immediate (mirrors the A32 0x00800000
+// BOffImm sentinel). Always lives in a B.W/BL slot (+-16MB), never a B<c>.W slot -- see bind().
+const int32_t VARAN_BOFF_INVALID_H = 0x00800000;
+#endif
+
+#if defined(VARAN_THUMB2)
+// Thumb-2 BOffImm (P1.2b Group 2). Unlike the A32 form it stores the RAW signed byte value -- a
+// real branch distance (dest-branch), a forward-chain link (a previous branch's buffer offset), or
+// the invalid sentinel -- and defers all bit-splitting to VaranEncodeBranchInst / DecodeBranchT2.
+// IsInRange uses the widest (B.W/BL) envelope; the +-1MB B<c>.W limit is handled by bind()'s
+// 2-slot invert+B.W fallback, so a conditional target in (1MB, 16MB] is still IN range here.
+class BOffImm
+{
+    friend class InstBranchImm;
+
+    int32_t data_;
+
+  public:
+    explicit BOffImm(int offset)
+      : data_(offset)
+    {
+        MOZ_ASSERT((offset & 0x1) == 0);   // Thumb-2: halfword aligned (A32 required word aligned)
+        if (!IsInRange(offset))
+            MOZ_CRASH("BOffImm offset out of range");
+    }
+
+    explicit BOffImm()
+      : data_(VARAN_BOFF_INVALID_H)
+    { }
+
+  private:
+    explicit BOffImm(const Instruction& inst);
+
+  public:
+    static const int32_t INVALID = VARAN_BOFF_INVALID_H;
+
+    uint32_t encode() const { return uint32_t(data_); }
+    int32_t decode() const { return data_; }
+
+    static bool IsInRange(int offset) {
+        return (offset & 0x1) == 0 && offset >= -16777216 && offset <= 16777214;
+    }
+
+    bool isInvalid() const { return data_ == VARAN_BOFF_INVALID_H; }
+    Instruction* getDest(Instruction* src) const;
+};
+#else
 class BOffImm
 {
     friend class InstBranchImm;
@@ -1004,6 +1124,7 @@ class BOffImm
     }
     Instruction* getDest(Instruction* src) const;
 };
+#endif
 
 class Imm16
 {
@@ -1193,6 +1314,34 @@ class Assembler : public AssemblerShared
         VFP_LessThan = CC // MI is valid too.
     };
 
+    // Varan -- clang-cl thumbv7 bug #6 (signed-enum-bitfield ABI).
+    //
+    // Neither ARMCondition nor Condition declares a fixed underlying type, so the compiler
+    // picks one. Their values run to AL = 0xE0000000, which is > INT_MAX, so a conforming
+    // implementation MUST choose an unsigned type -- and every condition-field shift in this
+    // backend (`uint32_t(c) >> 28`) silently depends on that. If the underlying type were ever
+    // signed, `>> 28` becomes an arithmetic shift and every conditional encoder emits the wrong
+    // condition nibble. Assert the property rather than trusting the deduction, since this is
+    // exactly the family that already bit us once as a bitfield ABI mismatch.
+    // ★ CORRECTED after the first thumbv7 build (2026-07-22). My first version asserted
+    // `Always > 0`, i.e. that the underlying type is UNSIGNED. That failed 106 times, and the
+    // failure was RIGHT: under the Microsoft ABI clang makes enums SIGNED int by default, so
+    // AL = 0xE0000000 really is negative here.
+    //
+    // But the backend does not require an unsigned underlying type -- it requires that
+    // `uint32_t(c) >> 28` yields the condition nibble, and conversion to uint32_t is modular,
+    // so that holds whether the enum is signed or not. The original assert tested a property
+    // the code never depended on and would have forced a gratuitous ABI change to the whole
+    // Condition enum. Assert the REAL invariant instead: every emit site does exactly this
+    // extraction, so if it ever stops holding, every conditional encoder breaks at once.
+    static_assert((uint32_t(Always) >> 28) == 0xEu,
+                  "VARAN: `uint32_t(c) >> 28` must yield the condition nibble -- every "
+                  "conditional encoder and the branch-over inversion depend on it");
+    static_assert((uint32_t(Condition(NE)) >> 28) == 0x1u,
+                  "VARAN: condition-nibble extraction is wrong for a non-AL condition");
+    static_assert((uint32_t(AL) >> 28) == 0xEu,
+                  "VARAN: ARMCondition nibble extraction must match Condition's");
+
     // Bit set when a DoubleCondition does not map to a single ARM condition.
     // The macro assembler has to special-case these conditions, or else
     // ConditionFromDoubleCondition will complain.
@@ -1326,10 +1475,17 @@ class Assembler : public AssemblerShared
 #endif
 
   public:
-    // For the alignment fill use NOP: 0x0320f000 or (Always | InstNOP::NopInst).
-    // For the nopFill use a branch to the next instruction: 0xeaffffff.
+    // For the alignment fill use NOP; for the nopFill use a branch to the next instruction.
+    // VARAN: Thumb-2 words + pcBias 4 (pc reads as Align(instr+4,4)=instr+4, vs A32's instr+8).
+    //   alignFill = NOP.W  0x8000F3AF  (== VARAN_NOPW_WORD)
+    //   nopFill   = B.W +4 0xB802F000  (EncodeBranchImmT2(4,false); decodes to off==4 so InstIsBNop
+    //               still matches -- default GetNopFill()==0 keeps it inert unless ARM_ASM_NOP_FILL>0)
     Assembler()
+#if defined(VARAN_THUMB2)
+      : m_buffer(1, 1, 8, GetPoolMaxOffset(), 4, 0x8000F3AFu, 0xB802F000u, GetNopFill()),
+#else
       : m_buffer(1, 1, 8, GetPoolMaxOffset(), 8, 0xe320f000, 0xeaffffff, GetNopFill()),
+#endif
 #ifdef JS_DISASM_ARM
         spewNext_(1000),
         printer_(nullptr),
@@ -1427,6 +1583,46 @@ class Assembler : public AssemblerShared
     // Write a blob of binary into the instruction stream *OR* into a
     // destination address.
     BufferOffset writeInst(uint32_t x);
+#if defined(VARAN_THUMB2)
+    // Raw emit of an already-encoded (halfword-swapped) Thumb-2 word -- converted encoders use
+    // this so they are NOT diverted to a UDF. emitUdf() writes a coded wide UDF + bumps the
+    // emit-time census. Under VARAN_THUMB2 writeInst() itself diverts every A32 word to emitUdf.
+    BufferOffset writeInstT2(uint32_t x);
+    BufferOffset emitUdf(uint32_t code);
+    // Emit-contract guard failure primitive (UDF under the simulator, MOZ_CRASH on device).
+    BufferOffset varanRejectPcField(uint32_t code);
+    // Coverage-gap primitive, same split as varanRejectPcField but a DIFFERENT meaning: this shape
+    // has no converted Thumb-2 encoder and is believed unreachable. A bare emitUdf() would be
+    // absent from a device build entirely (EncodeUdfT2 #errors off-simulator), so an unreachable
+    // path would silently become "emit nothing" there. This keeps it loud in both worlds.
+    BufferOffset varanUnsupported(uint32_t code);
+    // Patch the placeholder skip of a B<!c>.W branch-over once the body size is known.
+    // `br` is the offset returned when the placeholder was written; `inv` the inverted condition.
+    // Centralised because the skip arithmetic + OOM guard is the error-prone part and there are
+    // now eight branch-over sites; the per-site code stays explicit about WHAT it wraps.
+    void varanPatchCondSkip(BufferOffset br, uint32_t inv);
+    // VFP near-copy (Batch 2): emit the Thumb-2 form of an A32 VFP word -- force the cond nibble to AL
+    // (1110), halfword-swap for storage, and for a conditional (cond != AL) prepend a B<!c>.W
+    // branch-over. Returns the branch offset (conditional) or the VFP word offset (unconditional).
+    BufferOffset varanEmitVfp(uint32_t a32);
+    // Emit a T2 single load/store (Batch 4). t4base = the family's T4/reg hw0 base (T3 = |0x80).
+    // Handles Offset(imm T3/T4 or out-of-range synth via movw/movt+add r12), pre/post-index (T4 PUW),
+    // and register-offset (LSL 0..3 native, else shift-into-r12 synth). Multi-instruction on synth.
+    BufferOffset varanEmitDtr(uint32_t t4base, Index mode, Register rt, DTRAddr addr, Condition c);
+    // Emit a converted 1-slot Thumb-2 branch (B.W / BL / in-range B<c>.W) and mark it as a branch.
+    BufferOffset writeBranchInstT2(uint32_t word, Label* documentation = nullptr);
+    // Patch a reserved 2-slot conditional branch at [slot0, slot0+4] to land at buffer offset
+    // `target`: in +-1MB -> B<c>.W + NOP.W; beyond -> invert cond + branch-over B.W (the NEW
+    // +-1MB fallback; A32 had none). Used by bind() and the bound-backward emit path.
+    void varanPatchCondBranch2(BufferOffset slot0, int32_t target, Condition c);
+    // Emit a 2-slot conditional branch to label `l` (bound or forward-chained). Returns slot0.
+    BufferOffset varanAsBCond(Label* l, Condition c);
+    // Store a forward-chain link into the branch at slot0, respecting the 2-slot conditional layout
+    // (link goes in the companion B.W at slot0+4; slot0's B<c>.W condition is preserved). Used by
+    // retarget() so splicing a 2-slot conditional chain does not write the link where nextLink can't
+    // read it. 1-slot B.W/BL carry the link themselves.
+    void varanWriteChainLink(BufferOffset slot0, int32_t linkVal);
+#endif
 
     // As above, but also mark the instruction as a branch.
     BufferOffset writeBranchInst(uint32_t x, Label* documentation = nullptr);
@@ -1446,6 +1642,11 @@ class Assembler : public AssemblerShared
     void haltingAlign(int alignment);
     void nopAlign(int alignment);
     BufferOffset as_nop();
+#if defined(VARAN_THUMB2)
+    // ADR (T3): Rd = Align(PC,4) + imm12. The only legal wide PC-relative address materialisation
+    // in T32 -- see EncodeAdrT2 for why `mov.w rd,pc` and `add.w rd,pc,#imm` are not usable.
+    BufferOffset as_adr(Register rd, uint32_t imm12);
+#endif
     BufferOffset as_alu(Register dest, Register src1, Operand2 op2,
                         ALUOp op, SBit s = LeaveCC, Condition c = Always);
     BufferOffset as_mov(Register dest,
@@ -1587,6 +1788,11 @@ class Assembler : public AssemblerShared
     // bx can *only* branch to a register never to an immediate.
     BufferOffset as_bx(Register r, Condition c = Always);
 
+#if defined(VARAN_THUMB2)
+    // Absolute branch synth (ma_b(void*)): movw/movt ip=target|1; bx ip (+ conditional branch-over).
+    void varanAbsBranch(uint32_t target, Condition c);
+#endif
+
     // Branch can branch to an immediate *or* to a register. Branches to
     // immediates are pc relative, branches to registers are absolute.
     BufferOffset as_b(BOffImm off, Condition c, Label* documentation = nullptr);
@@ -1695,6 +1901,18 @@ class Assembler : public AssemblerShared
 
     BufferOffset as_vmrs(Register r, Condition c = Always);
     BufferOffset as_vmsr(Register r, Condition c = Always);
+
+#if defined(VARAN_THUMB2)
+    // Read the emitted 32-bit word at a byte offset (public wrapper over the protected editSrc, for
+    // the P1.2b bind() end-to-end test). Defined in the .cpp -- Instruction is incomplete here.
+    uint32_t varanPeekWord(int byteOffset);
+    // Batch-4 pool self-test: PoolHintData index round-trip + alias-guard headroom. .cpp-defined
+    // (PoolHintData is .cpp-private). Returns failed-check count (0 = pass).
+    static int varanPoolHintSelfTest();
+    // Batch-4 2-slot jump-writer self-test: VaranComputeJump2 across Always/cond, in-range + >+-1MB
+    // overflow fallback, with a decode round-trip. Returns failed-check count (0 = pass).
+    static int varanJumpPatch2SelfTest();
+#endif
 
     // Label operations.
     bool nextLink(BufferOffset b, BufferOffset* next);
@@ -1893,6 +2111,11 @@ class Assembler : public AssemblerShared
     void flushBuffer();
     void enterNoPool(size_t maxInst);
     void leaveNoPool();
+#if defined(VARAN_THUMB2)
+    // See VaranForbidPoolsIfOutermost -- enterNoPool() is not re-entrant, so an emitter
+    // that may run inside someone else's region has to ask before opening its own.
+    bool inNoPoolRegion() const { return m_buffer.inNoPoolRegion(); }
+#endif
     // This should return a BOffImm, but we didn't want to require everyplace
     // that used the AssemblerBuffer to make that class.
     static ptrdiff_t GetBranchOffset(const Instruction* i);
@@ -1965,6 +2188,14 @@ class Instruction
     {
         MOZ_ASSERT((data_ & 0xf0000000) == 0);
     }
+#if defined(VARAN_THUMB2)
+    // Raw store of a fully-formed 32-bit Thumb-2 word (halfword-swapped, hw0 in bits 15:0). The
+    // condition is baked into the T3 encoding, not the top nibble, so neither A32 ctor applies.
+    enum VaranRawTag { VaranRaw };
+    Instruction(uint32_t rawWord, VaranRawTag)
+      : data(rawWord)
+    { }
+#endif
     // You should never create an instruction directly. You should create a more
     // specific instruction which will eventually call one of these constructors
     // for you.
@@ -1987,8 +2218,17 @@ class Instruction
     // Since almost all instructions have condition codes, the condition code
     // extractor resides in the base class.
     Assembler::Condition extractCond() {
+#if defined(VARAN_THUMB2)
+        // Thumb-2: the condition lives in the T3 (B<c>.W) encoding; T4/T1/uncond -> Always.
+        // Only branch instructions carry a condition in this backend (bind() reads it off branches).
+        uint32_t condField;
+        if (VaranDecodeBranchCond(data, &condField) && condField < 14)
+            return (Assembler::Condition)(condField << 28);
+        return Assembler::Always;
+#else
         MOZ_ASSERT(data >> 28 != 0xf, "The instruction does not have condition code");
         return (Assembler::Condition)(data & 0xf0000000);
+#endif
     }
     // Get the next instruction in the instruction stream.
     // This does neat things like ignoreconstant pools and their guards.
@@ -2001,6 +2241,10 @@ class Instruction
     // instruction. raw() just coerces this into a pointer to a uint32_t.
     const uint32_t* raw() const { return &data; }
     uint32_t size() const { return 4; }
+#if defined(VARAN_THUMB2)
+    // In-place raw patch of a fully-formed Thumb-2 word (used by the 2-slot conditional fixup).
+    void varanSetRaw(uint32_t w) { data = w; }
+#endif
 }; // Instruction
 
 // Make sure that it is the right size.
@@ -2039,21 +2283,30 @@ class InstLDR : public InstDTR
     static InstLDR* AsTHIS(const Instruction& i);
 
     int32_t signedOffset() const {
+#if defined(VARAN_THUMB2)
+        // T2 ldr.w Rt,[pc,#imm]: imm12 lives in hw1 (bits 27:16), U in hw0 bit7 (0x80).
+        int32_t offset = int32_t((encode() >> 16) & 0xfff);
+        if (((encode() >> 7) & 1) == 0)
+            return -offset;
+        return offset;
+#else
         int32_t offset = encode() & 0xfff;
         if (IsUp_(encode() & IsUp) != IsUp)
             return -offset;
         return offset;
+#endif
     }
     uint32_t* dest() const {
         int32_t offset = signedOffset();
-        // When patching the load in PatchConstantPoolLoad, we ensure that the
-        // offset is a multiple of 4, offset by 8 bytes from the actual
-        // location.  Indeed, when the base register is PC, ARM's 3 stages
-        // pipeline design makes it that PC is off by 8 bytes (= 2 *
-        // sizeof(uint32*)) when we actually executed it.
         MOZ_ASSERT(offset % 4 == 0);
         offset >>= 2;
+#if defined(VARAN_THUMB2)
+        // T2: pc reads as Align(instr+4,4) = raw()+4 = raw()+1 word (vs A32's +8 = +2 words).
+        return (uint32_t*)raw() + offset + 1;
+#else
+        // A32: base register PC is off by 8 bytes (= 2 * sizeof(uint32*)) at execute time.
         return (uint32_t*)raw() + offset + 2;
+#endif
     }
 };
 JS_STATIC_ASSERT(sizeof(InstDTR) == sizeof(InstLDR));
@@ -2061,11 +2314,17 @@ JS_STATIC_ASSERT(sizeof(InstDTR) == sizeof(InstLDR));
 class InstNOP : public Instruction
 {
   public:
+#if defined(VARAN_THUMB2)
+    static const uint32_t NopInst = 0x8000F3AFu;   // NOP.W (stored hw1<<16|hw0)
+    InstNOP()
+      : Instruction(NopInst, Instruction::VaranRaw)
+    { }
+#else
     static const uint32_t NopInst = 0x0320f000;
-
     InstNOP()
       : Instruction(NopInst, Assembler::Always)
     { }
+#endif
 
     static bool IsTHIS(const Instruction& i);
     static InstNOP* AsTHIS(Instruction& i);
@@ -2083,9 +2342,19 @@ class InstBranchReg : public Instruction
 
     static const uint32_t IsBRegMask = 0x0ffffff0;
 
+#if defined(VARAN_THUMB2)
+    // Thumb-2 register branch: BX/BLX Rm are 16-bit-only, packed in the HIGH halfword (NOP16 0xbf00
+    // low) so the buffer stays a 4-byte unit and BLX's hardware LR = slot+4 = the recorded call site.
+    // High halfword = (0x4700 BX / 0x4780 BLX) | (Rm<<3). cond is dropped (T2 BX/BLX are unconditional).
+    InstBranchReg(BranchTag tag, Register rm, Assembler::Condition c)
+      : Instruction((((tag == IsBLX ? 0x4780u : 0x4700u) | (rm.code() << 3)) << 16) | 0xbf00u,
+                    Instruction::VaranRaw)
+    { }
+#else
     InstBranchReg(BranchTag tag, Register rm, Assembler::Condition c)
       : Instruction(tag | rm.code(), c)
     { }
+#endif
 
   public:
     static bool IsTHIS (const Instruction& i);
@@ -2109,9 +2378,19 @@ class InstBranchImm : public Instruction
 
     static const uint32_t IsBImmMask = 0x0f000000;
 
+#if defined(VARAN_THUMB2)
+    // Thumb-2: build the real T1/T4/T3 word from the byte value + condition. IsBL -> T1 BL, Always
+    // -> T4 B.W, else T3 B<c>.W. (Conditional far branches never reach here with an out-of-T3 value:
+    // their chain link / sentinel is stored in a companion B.W slot -- see as_b(Label*, c).)
+    InstBranchImm(BranchTag tag, BOffImm off, Assembler::Condition c)
+      : Instruction(VaranEncodeBranchInst(tag == IsBL, off.decode(), uint32_t(c) >> 28),
+                    Instruction::VaranRaw)
+    { }
+#else
     InstBranchImm(BranchTag tag, BOffImm off, Assembler::Condition c)
       : Instruction(tag | off.encode(), c)
     { }
+#endif
 
   public:
     static bool IsTHIS (const Instruction& i);
@@ -2423,6 +2702,45 @@ class AutoForbidPools
         masm_->leaveNoPool();
     }
 };
+
+#if defined(VARAN_THUMB2)
+// Varan -- a NESTING-SAFE AutoForbidPools.
+//
+// ★ THIS IS THE ROOT CAUSE OF THE LARGEST ASSERTION IN THE TREE (842 Ion + 5 wasm hits of
+// `MOZ_ASSERT(!canNotPlacePool_)` at IonAssemblerBufferWithConstantPools.h:1034), and it was
+// introduced by our own conditional-forms conversion:
+//
+//   CodeGeneratorARM::visitTableSwitch opens `AutoForbidPools afp(&masm, 1 + 1 + cases)`
+//   and then emits `ma_ldr(..., Assembler::NotSigned)` -- a CONDITIONAL load. Before the
+//   conversion that was one A32 instruction. Now it routes through varanEmitDtr's
+//   conditional arm, which opens its OWN AutoForbidPools -> enterNoPool re-entry -> assert.
+//   Any conditional emit inside any pre-existing no-pool region hits this.
+//
+// Skipping the inner region is CORRECT, not a suppression: the property the branch-over
+// needs is "no pool between the branch and its body", and an enclosing no-pool region
+// guarantees exactly that, more strongly. (Under-counting the outer maxInst is benign here
+// -- maxInst only decides whether to flush BEFORE entering; once inside, no pool is placed
+// at all. And the branch-over allocates no pool ENTRIES, which is the thing line 839
+// actually forbids inside a region.)
+class MOZ_RAII VaranForbidPoolsIfOutermost
+{
+    Assembler* masm_;
+    bool owns_;
+
+  public:
+    VaranForbidPoolsIfOutermost(Assembler* masm, size_t maxInst)
+      : masm_(masm), owns_(!masm->inNoPoolRegion())
+    {
+        if (owns_)
+            masm_->enterNoPool(maxInst);
+    }
+
+    ~VaranForbidPoolsIfOutermost() {
+        if (owns_)
+            masm_->leaveNoPool();
+    }
+};
+#endif
 
 } // namespace jit
 } // namespace js

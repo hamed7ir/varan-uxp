@@ -3,7 +3,16 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-if CONFIG['TARGET_CPU'] == 'x86_64':
+# Varan: Windows ARM32 (Thumb-2, hardfp AAPCS). Without this branch the
+# generic `else` below mis-selects the x86 MASM xptcinvoke_asm_x86_msvc.asm on ARM (the
+# harvest's "unexpected token"/"invalid instruction" from `push %eax` / `_PrepareAndDispatch@16`).
+# These two files are authored from the md/unix ARM AAPCS templates + MSVC name mangling.
+if CONFIG['CPU_ARCH'] == 'arm':
+    SOURCES += [
+        'xptcinvoke_arm.cpp',
+        'xptcstubs_arm.cpp',
+    ]
+elif CONFIG['TARGET_CPU'] == 'x86_64':
     if CONFIG['GNU_CXX']:
         SOURCES += [
             'xptcinvoke_x86_64.cpp',

@@ -97,6 +97,12 @@ inline void NoBarrier_Store(volatile Atomic32* ptr, Atomic32 value) {
   return Locked_Store(ptr, value);
 }
 
+// Varan: the SDK winnt.h MemoryBarrier() macro (ARM: __dmb(...)) eats this decl ->
+// "variable has incomplete type void". Same collision the S6 atomicops.h/generic_gcc.h fix handled;
+// this mutex-atomics fallback header is only compiled on Win-ARM (S7c), so it needs the guard too.
+#if defined(MemoryBarrier)
+#undef MemoryBarrier
+#endif
 inline void MemoryBarrier() {
   AutoLock _(gAtomicsMutex);
   // lock/unlock work as a barrier here

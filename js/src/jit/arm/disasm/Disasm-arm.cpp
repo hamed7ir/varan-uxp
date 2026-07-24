@@ -143,10 +143,19 @@ class Decoder {
 
 
 // Append the ch to the output buffer.
+//
+// Varan: BOUNDS-CHECKED. This wrote out_buffer_[out_buffer_pos_++] unconditionally, relying on
+// every caller to have pre-checked. That held for A32, but this decoder has NO Thumb-2 support
+// (grep: zero occurrences of VARAN_THUMB2 or "thumb" in this file) and we now feed it Thumb-2
+// words, which it mis-decodes into garbage fields -- long/absurd operand strings that run
+// out_buffer_pos_ off the end. The overrun then trips MOZ_ASSERT(0 <= index && index < length_)
+// in V8Vector::operator[] (Disasm-arm.h:44), taking down the shell.
+// A DIAGNOSTIC TOOL MUST DEGRADE, NEVER CRASH: truncate instead.
 void
 Decoder::PrintChar(const char ch)
 {
-    out_buffer_[out_buffer_pos_++] = ch;
+    if (out_buffer_pos_ < int(out_buffer_.length()) - 1)
+        out_buffer_[out_buffer_pos_++] = ch;
 }
 
 
@@ -159,7 +168,14 @@ Decoder::Print(const char* str)
         PrintChar(cur);
         cur = *str++;
     }
-    out_buffer_[out_buffer_pos_] = 0;
+    // Varan: the loop was guarded but THIS terminator was not -- once out_buffer_pos_ reached the
+    // end the loop simply did not run and we indexed out of bounds here. This is the exact site
+    // that fired on coverage/simple.js. Clamp it.
+    int varanEnd = out_buffer_pos_;
+    if (varanEnd > int(out_buffer_.length()) - 1)
+        varanEnd = int(out_buffer_.length()) - 1;
+    if (varanEnd >= 0)
+        out_buffer_[varanEnd] = 0;
 }
 
 
@@ -2136,8 +2152,31 @@ Disassembler::~Disassembler()
 int
 Disassembler::InstructionDecode(V8Vector<char> buffer, uint8_t* instruction)
 {
+#if defined(VARAN_THUMB2)
+    // ★ Varan: MAKE THE INSTRUMENT HONEST.
+    //
+    // This decoder is A32-ONLY -- there is not one occurrence of "thumb" or VARAN_THUMB2 anywhere
+    // else in this file -- and Varan emits Thumb-2 (halfword-swapped 32-bit words). Handing a T2
+    // word to the A32 decoder yields garbage operands: that is what produced the absurd operand
+    // strings which overran out_buffer_ and tripped V8Vector::operator[] (Disasm-arm.h:44) on
+    // coverage/simple.js.
+    //
+    // The bounds fix in PrintChar/Print stops the crash, but a disassembler that prints CONFIDENT
+    // NONSENSE is worse than one that admits it cannot read the stream -- and this instrument is
+    // exactly what a Thumb-bit / jump-table investigation would lean on. So do not pretend: print
+    // the raw word and say what it is.
+    //
+    // For real Thumb-2 disassembly, extract the bytes and use `llvm-objdump -m thumb` (the branch
+    // oracle already byte-matches our encoders against LLVM, so that is the trusted path).
+    // 4 = our T2 slot size (writeInstT2 stores one 4-byte slot per emitted wide instruction).
+    uint32_t varanWord;
+    memcpy(&varanWord, instruction, sizeof(varanWord));
+    SNPrintF(buffer, "0x%08x  (Thumb-2, not decoded)", varanWord);
+    return 4;
+#else
     Decoder d(converter_, buffer);
     return d.InstructionDecode(instruction);
+#endif
 }
 
 

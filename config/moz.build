@@ -29,7 +29,10 @@ if CONFIG['HOST_OS_ARCH'] != 'WINNT':
     # while the program here is in C.
     HostProgram('nsinstall_real', c_only=True)
 
-if CONFIG['HOST_OS_ARCH'] == 'WINNT':
+# ARM32/UWP build spike: action_cl is the cl.exe -showIncludes wrapper; clang-cl
+# does not use it (see config/config.mk gate), so don't build it for clang-cl -- it
+# would otherwise be cross-built to ARM (HOST_CC=$(CC)) and fail the host link.
+if CONFIG['HOST_OS_ARCH'] == 'WINNT' and not CONFIG['CLANG_CL']:
     HOST_SOURCES +=[
         'action_cl.cpp',
     ]

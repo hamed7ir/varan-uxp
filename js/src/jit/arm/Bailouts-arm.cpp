@@ -93,6 +93,21 @@ BailoutFrameInfo::BailoutFrameInfo(const JitActivationIterator& activations,
     uintptr_t tableOffset = bailout->tableOffset();
     uintptr_t tableStart = reinterpret_cast<uintptr_t>(Assembler::BailoutTableStart(code->raw()));
 
+#if defined(VARAN_THUMB2)
+    // ---- D3 (return-address class, 4th instance) ----
+    //
+    // tableOffset is a RETURN ADDRESS: the bailout table is a run of `bl` instructions, and
+    // this is the lr they pushed. On Thumb-2 that address has bit0 SET (the instruction-set
+    // selector), so `(tableOffset - tableStart)` is one greater than the true byte distance
+    // and the entry-size modulo below can never hold -- 61 Ion assertions.
+    //
+    // MASK, do not set: this value is being used for ARITHMETIC (a distance, then a divide),
+    // never branched through. That is the same reasoning as D1's exact-offset lookup, and the
+    // opposite of B1/C7 where a code address is about to be jumped to. `tableStart` comes from
+    // code->raw() and is already even, so only the return address needs masking.
+    tableOffset &= ~uintptr_t(1);
+#endif
+
     MOZ_ASSERT(tableOffset >= tableStart &&
                tableOffset < tableStart + code->instructionsSize());
     MOZ_ASSERT((tableOffset - tableStart) % BAILOUT_TABLE_ENTRY_SIZE == 0);

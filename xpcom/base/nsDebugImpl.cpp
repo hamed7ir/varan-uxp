@@ -483,8 +483,19 @@ Break(const char* aMsg)
     si.wShowWindow = SW_SHOW;
 
     // 2nd arg of CreateProcess is in/out
+#if defined(_M_ARM)
+    // Varan (clang-cl thumbv7 codegen BUG #5): the historical `_alloca`
+    // here is a *dynamic* stack allocation that forces the ARM backend to establish a base
+    // pointer, which then miscompiles the co-located `&si`/`&pi` aggregates (8-byte
+    // frame-index split) handed to CreateProcessW below. Use the nsAutoString's own
+    // (inline/heap) buffer directly — no alloca, no base pointer. This is a second, rare
+    // (abort/assert-dialog path only) instance of bug #5. See CLANG-CL-THUMBV7-BUGS.md #5.
+    NS_ConvertUTF8toUTF16 wideMsg(aMsg);
+    wchar_t* msgCopy = reinterpret_cast<wchar_t*>(wideMsg.BeginWriting());
+#else
     wchar_t* msgCopy = (wchar_t*)_alloca((strlen(aMsg) + 1) * sizeof(wchar_t));
     wcscpy(msgCopy, NS_ConvertUTF8toUTF16(aMsg).get());
+#endif
 
     if (GetModuleFileNameW(GetModuleHandleW(L"xpcom.dll"), executable, MAX_PATH) &&
         (pName = wcsrchr(executable, '\\')) != nullptr &&

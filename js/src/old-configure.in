@@ -708,6 +708,10 @@ case "$target" in
             AS="$(basename "$AS_BIN")"
         fi
         AR='lib'
+        dnl ARM32/UWP build spike: clang-cl toolchain uses llvm-lib (a drop-in for
+        dnl the MSVC librarian, and on the MozillaBuild PATH); lib.exe is not on
+        dnl PATH here -> expandlibs "[WinError 2] cannot find the file specified".
+        if test -n "$CLANG_CL"; then AR='llvm-lib'; fi
         AR_FLAGS='-NOLOGO -OUT:$@'
         AR_EXTRACT=
         RANLIB='echo not_ranlib'
@@ -887,6 +891,17 @@ case "$target" in
             DSO_LDOPTS="$DSO_LDOPTS -MACHINE:X64"
         fi
         AC_DEFINE(_AMD64_)
+        ;;
+    arm*)
+        dnl Varan: ARM32 Windows (Thumb-2) cross target. Mirror the
+        dnl x86_64 arm: -MACHINE:ARM on the target DSO link (gated on _WIN32_MSVC,
+        dnl which clang-cl sets, not GNU_CC) + AC_DEFINE(_ARM_) so the Windows SDK
+        dnl winnt.h selects its ARM path. _ARM_ was previously supplied by the -FI
+        dnl arm-winnt-shim.h; now delivered via js-confdefs.h like _X86_/_AMD64_.
+        if test -n "$_WIN32_MSVC"; then
+            DSO_LDOPTS="$DSO_LDOPTS -MACHINE:ARM"
+        fi
+        AC_DEFINE(_ARM_)
         ;;
     *)
     	AC_DEFINE(_CPU_ARCH_NOT_DEFINED)
@@ -2076,7 +2091,11 @@ if test "$JS_HAS_CTYPES"; then
   dnl JS_HAS_CTYPES is defined by Python configure. This check remains
   dnl as long as determining $AS remains in old-configure.
   dnl Error out if we're on MSVC and MASM is unavailable.
-  if test -n "$_MSC_VER" -a \( "$AS" != "ml.exe" -a "$AS" != "ml64.exe" \); then
+  dnl Varan (M4.1): on ARM/WINNT, libffi's Microsoft MSVC-ABI
+  dnl backend (sysv_msvc_arm32.S) is assembled by a per-directory AS override
+  dnl (armasm via config/external/ffi/Makefile.in), NOT the global ml/ml64. This
+  dnl x86-centric MASM gate is a false positive there, so skip it for CPU_ARCH=arm.
+  if test -n "$_MSC_VER" -a \( "$AS" != "ml.exe" -a "$AS" != "ml64.exe" \) -a "$CPU_ARCH" != "arm"; then
     AC_MSG_ERROR([\"$AS\" is not a suitable assembler to build js-ctypes. If you are building with MS Visual Studio 8 Express, you may download the MASM 8.0 package, upgrade to Visual Studio 9 Express, or install the Vista SDK. Or do not use --enable-ctypes.])
   fi
 fi
@@ -2269,6 +2288,16 @@ AC_SUBST(JS_CONFIG_LIBS)
 
 # Avoid using obsolete NSPR features
 AC_DEFINE(NO_NSPR_10_SUPPORT)
+
+dnl Varan M1/M2: wire ICU for the js-STANDALONE build only. js/src never called
+dnl MOZ_CONFIG_ICU, leaving USE_ICU unset for a bare js build (yet vm/Initialization.cpp
+dnl #includes unicode/uclean.h). M2: gate on JS_STANDALONE -- in a full browser build the
+dnl TOP-LEVEL old-configure.in already calls MOZ_CONFIG_ICU (shared ICU); running it again
+dnl in this js sub-configure sets a conflicting archive/icustubdata ICU mode and breaks the
+dnl xul link. Macro is pulled in via js/src/aclocal.m4.
+if test "$JS_STANDALONE"; then
+  MOZ_CONFIG_ICU()
+fi
 
 dnl Spit out some output
 dnl ========================================================

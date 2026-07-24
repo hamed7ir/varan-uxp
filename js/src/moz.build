@@ -395,6 +395,11 @@ SOURCES += [
     'builtin/Stream.cpp',
     'frontend/Parser.cpp',
     'gc/StoreBuffer.cpp',
+    # Varan (Varan JIT, task #33): the shared JIT-PC resolver + fault reporter.
+    # NON-unified on purpose -- it has file-scope `using namespace` that must not leak into a
+    # sibling TU. Compiled in every config (the resolver is cross-platform; the Windows-ARM
+    # fault-filter body is guarded and dormant elsewhere).
+    'jit/VaranFaultReporter.cpp',
     'jsarray.cpp',
     'jsatom.cpp',
     'jsdtoa.cpp',
@@ -482,6 +487,54 @@ elif CONFIG['JS_CODEGEN_ARM']:
         'jit/arm/SharedIC-arm.cpp',
         'jit/arm/Trampoline-arm.cpp',
     ]
+    # Varan (Varan JIT): turn on the Thumb-2 backend for a REAL ARM target.
+    #
+    # SCOPE IS js/src, NOT js/src/jit: VARAN_THUMB2 is referenced from 19 files, and three of
+    # them are outside jit/arm -- builtin/TestingFunctions.cpp (the varanT2* self-tests),
+    # jit/Baseline*.cpp / jit/SharedIC.cpp (the C7 return-address ORs) and wasm/WasmCode.cpp
+    # (the D1 callsite mask). All of them are declared in THIS moz.build, so DEFINES here
+    # covers every one.
+    #
+    # ⚠ `not JS_SIMULATOR_ARM` is load-bearing, not tidiness. Both simulator shells are
+    # JS_CODEGEN_ARM, and one of them (obj-js-x86sim) is the A32 CONTROL for the whole
+    # differential gate. Defining VARAN_THUMB2 on JS_CODEGEN_ARM alone would silently convert
+    # the control to Thumb-2 and make every A32-vs-T2 comparison compare a shell against
+    # itself. The sim shells get -DVARAN_THUMB2 from their own mozconfig CFLAGS instead, which
+    # is what keeps the two of them distinguishable.
+    if not CONFIG['JS_SIMULATOR_ARM']:
+        DEFINES['VARAN_THUMB2'] = True
+
+        # The two clang-bug harvest guards, SCOPED to js/src. They were tried in the
+        # mozconfig first and that was wrong: global CFLAGS reach every vendored library,
+        # and the build died with 20 errors -- all of them ICU's calendar.cpp bitfields,
+        # none of them ours. Third-party code we do not own must not be held to a guard we
+        # added for our own backend.
+        #   -Wvla-extension            clang bug #5 (dynamic-alloca base-pointer split) is
+        #                              GREP-BLIND -- a VLA causes the same dynamic stack
+        #                              adjustment with no "alloca" token anywhere. This makes
+        #                              them visible so a bp_scan hit has a source explanation.
+        #   -Wsigned-enum-bitfield     clang bug #6 (signed-enum-bitfield ABI). A WARNING, not
+        #                              -Werror: as an error it produced 313 failures in js/src
+        #                              alone, essentially all of them PRE-EXISTING UPSTREAM
+        #                              SpiderMonkey enums in bitfields. Holding upstream code we
+        #                              did not write to a guard we added for our backend is the
+        #                              same mistake as holding ICU to it -- it converts a useful
+        #                              signal into a wall. The hard guarantee for the enums we
+        #                              actually depend on lives in Assembler-arm.h's
+        #                              static_asserts on the condition-nibble extraction; this
+        #                              flag keeps the broader class VISIBLE in the build log.
+        #
+        # ★ -Wno-error= is REQUIRED, not optional (task #33). The standalone js.exe build does not
+        # enable warnings-as-errors, so a bare `-Wsigned-enum-bitfield` stayed a warning there by
+        # luck. The FULL BROWSER build compiles js/src under a global `-Werror`, which promoted
+        # these 336 warnings to errors and broke the link. Pinning `-Wno-error=` here makes "keep
+        # it a WARNING" true in BOTH build types -- which is exactly what the comment above always
+        # claimed. Without it the guard is a wall in any warnings-as-errors build.
+        CFLAGS += ['-Wvla-extension', '-Wsigned-enum-bitfield',
+                   '-Wno-error=vla-extension', '-Wno-error=signed-enum-bitfield']
+        CXXFLAGS += ['-Wvla-extension', '-Wsigned-enum-bitfield',
+                     '-Wno-error=vla-extension', '-Wno-error=signed-enum-bitfield']
+
     if CONFIG['JS_SIMULATOR_ARM']:
         jit_ioncheck2_deunified_sources += [
             'jit/arm/Simulator-arm.cpp'
@@ -616,6 +669,12 @@ if CONFIG['JS_HAS_CTYPES']:
             '!ctypes/libffi/include',
             'ctypes/libffi/src/%s' % CONFIG['FFI_TARGET_DIR'],
         ]
+        # Varan (M4.1): the in-tree libffi 3.4.6 is compiled with
+        # FFI_STATIC_BUILD (config/external/ffi/moz.build) so its ffi.h FFI_API is
+        # empty (plain symbols). The consumers (CTypes.cpp/Library.cpp) MUST see the
+        # same, else ffi.h decorates ffi_call/ffi_type_* as __declspec(dllimport) and
+        # the static link fails with "undefined symbol __declspec(dllimport) ffi_*".
+        DEFINES['FFI_STATIC_BUILD'] = True
 
 if CONFIG['MOZ_VTUNE']:
     SOURCES += [
@@ -665,6 +724,10 @@ else:
         # which the shell doesn't want, so link the other bits.
         USE_LIBS += [
             'icui18n',
+            # Varan M1: icustubdata provides the icudt##_dat stub symbol ICU's udata
+            # references; the real ICU data ships beside the exe as the external
+            # icudt##l.dat archive (MOZ_ICU_DATA_ARCHIVE) and loads at runtime. (Sorted.)
+            'icustubdata',
             'icuuc',
         ]
 

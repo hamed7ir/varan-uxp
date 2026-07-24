@@ -28,6 +28,19 @@
 
 using namespace js;
 using namespace js::jit;
+// ---- C7 (Batch F): the Thumb bit on SYNTHESIZED code addresses ----------------------------------
+// Addresses built as `code->raw() + offset` and later branched through via `ldr pc` / `bx lr`. On
+// Thumb-2 the low bit of a branch target selects the instruction set: odd = Thumb, EVEN = ARM. B1 ORs
+// the bit at the branch for everything reaching PC through a register (ma_bx / ma_blx /
+// call(Register)); these sinks have NO branch-time register, so the bit is set at CONSTRUCTION.
+// Applied ONLY where the C7 consumer audit cleared it. Over-applying is itself the bug -- see the
+// audit for the leave-even and actively-harmful verdicts.
+#if defined(VARAN_THUMB2)
+# define VARAN_C7_ORBIT(x) ((decltype(x))(uintptr_t(x) | 1))
+#else
+# define VARAN_C7_ORBIT(x) (x)
+#endif
+
 
 // BaselineStackBuilder may reallocate its buffer if the current one is too
 // small. To avoid dangling pointers, BufferPointer represents a pointer into
@@ -1088,7 +1101,7 @@ InitFromBailout(JSContext* cx, HandleScript caller, jsbytecode* callerPC,
 
             // Set the resume address to the return point from the IC, and set
             // the monitor stub addr.
-            builder.setResumeAddr(baselineScript->returnAddressForIC(icEntry));
+            builder.setResumeAddr(VARAN_C7_ORBIT(baselineScript->returnAddressForIC(icEntry)));
             builder.setMonitorStub(firstMonStub);
             JitSpew(JitSpew_BaselineBailouts, "      Set resumeAddr=%p monitorStub=%p",
                     baselineScript->returnAddressForIC(icEntry), firstMonStub);
@@ -1200,7 +1213,7 @@ InitFromBailout(JSContext* cx, HandleScript caller, jsbytecode* callerPC,
     // The icEntry in question MUST have an inlinable fallback stub.
     BaselineICEntry& icEntry = baselineScript->icEntryFromPCOffset(pcOff);
     MOZ_ASSERT(IsInlinableFallback(icEntry.firstStub()->getChainFallback()));
-    if (!builder.writePtr(baselineScript->returnAddressForIC(icEntry), "ReturnAddr"))
+    if (!builder.writePtr(VARAN_C7_ORBIT(baselineScript->returnAddressForIC(icEntry)), "ReturnAddr"))
         return false;
 
     // Build baseline stub frame:

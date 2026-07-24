@@ -369,6 +369,10 @@ public:
       size_t nBytes = 1 + sizeof(intptr_t);
 #elif defined(_M_X64)
       size_t nBytes = 2 + sizeof(intptr_t);
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(__arm__) || defined(__aarch64__)
+      // Varan: ARM installs no detour hooks (mCurHooks==0), so this
+      // unhook loop never runs; give nBytes a valid value so the dead code compiles.
+      size_t nBytes = sizeof(intptr_t);
 #else
 #error "Unknown processor type"
 #endif
@@ -394,6 +398,10 @@ public:
       if (origBytes[0] != 0x49 || origBytes[1] != 0xBB)
         continue;
       *((intptr_t*)(origBytes + 2)) = dest;
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(__arm__) || defined(__aarch64__)
+      // Varan: ARM -- dead loop (no hooks); nothing to unhook.
+      (void)dest;
+      continue;
 #else
 #error "Unknown processor type"
 #endif
@@ -661,6 +669,14 @@ protected:
   void CreateTrampoline(void* aOrigFunction, intptr_t aDest, void** aOutTramp)
   {
     *aOutTramp = nullptr;
+
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(__arm__) || defined(__aarch64__)
+    // Varan: no ARM detour-trampoline codegen. Leave *aOutTramp null so
+    // AddHook() returns false; every consumer treats that as "hook not installed"
+    // (nsWindow's hooks are a11y/cosmetic + DebugOnly/early-return; the rest diagnostic).
+    (void)aOrigFunction; (void)aDest;
+    return;
+#else
 
     AutoVirtualProtect protectHookPage(mHookPage, mMaxHooks * kHookSize,
                                        PAGE_EXECUTE_READWRITE);
@@ -1023,6 +1039,7 @@ protected:
     origBytes[11] = 0xff;
     origBytes[12] = 0xe3;
 #endif
+#endif // Varan: end ARM CreateTrampoline stub
   }
 
   byteptr_t FindTrampolineSpace()

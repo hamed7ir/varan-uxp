@@ -82,6 +82,12 @@ elif CONFIG['OS_TARGET'] == 'WINNT':
     )
     if CONFIG['CPU_ARCH'] == 'x86_64':
         DEFINES['_AMD64_'] = True
+    elif CONFIG['CPU_ARCH'] == 'arm':
+        # ARM32/UWP build spike: define _ARM_ (not the x86 fallthrough _X86_) so NSPR's
+        # Windows MD code takes its non-x86 paths -- InterlockedIncrement/Decrement
+        # atomics (_win95.h:315-319) and PR_NOT_REACHED in ntgc.c -- instead of the x86
+        # __asm blocks in ntgc.c/ntmisc.c that clang-cl cannot assemble for thumbv7.
+        DEFINES['_ARM_'] = True
     else:
         DEFINES['_X86_'] = True
 else:

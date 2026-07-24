@@ -124,7 +124,9 @@ PRMJ_FormatTime(char* buf, int buflen, const char* fmt, PRMJTime* tm);
 
 #define MOZ_HAVE_RDTSC 1
 
-#if defined(_WIN32)
+// ARM32/UWP build spike: __rdtsc is an x86-only intrinsic; on ARM Windows fall
+// through to the #else below which #undef's MOZ_HAVE_RDTSC (callers guard on it).
+#if defined(_WIN32) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
 
 #include <intrin.h>
 static __inline uint64_t

@@ -225,9 +225,17 @@ CanvasRenderingContextHelper::UpdateContext(JSContext* aCx,
 
   nsCOMPtr<nsICanvasRenderingContextInternal> currentContext = mCurrentContext;
 
+  // Varan (M4.1b): when context (re)configuration fails we null
+  // mCurrentContext; the type MUST be reset too, or the invariant "context null
+  // <=> type NoContext" breaks and consumers that key off the stale type deref the
+  // null context (e.g. OffscreenCanvas::TransferToImageBitmap casts to WebGLContext
+  // and calls ClearScreen()). On this GPU-off build WebGL SetDimensions ALWAYS
+  // fails, making that deref guaranteed rather than merely possible. General
+  // correctness fix (unconditional).
   nsresult rv = currentContext->SetIsOpaque(GetOpaqueAttr());
   if (NS_FAILED(rv)) {
     mCurrentContext = nullptr;
+    mCurrentContextType = CanvasContextType::NoContext;
     return rv;
   }
 
@@ -235,12 +243,14 @@ CanvasRenderingContextHelper::UpdateContext(JSContext* aCx,
                                          aRvForDictionaryInit);
   if (NS_FAILED(rv)) {
     mCurrentContext = nullptr;
+    mCurrentContextType = CanvasContextType::NoContext;
     return rv;
   }
 
   rv = currentContext->SetDimensions(sz.width, sz.height);
   if (NS_FAILED(rv)) {
     mCurrentContext = nullptr;
+    mCurrentContextType = CanvasContextType::NoContext;
   }
 
   return rv;

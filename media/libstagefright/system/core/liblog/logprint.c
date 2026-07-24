@@ -30,6 +30,7 @@
 #include <log/logprint.h>
 
 #ifdef _MSC_VER
+#include <io.h>  /* write() -- Varan: mirrors fake_log_device.c in this dir */
 #if _MSC_VER < 1900
 #include <nspr/prprf.h>
 #define snprintf PR_snprintf

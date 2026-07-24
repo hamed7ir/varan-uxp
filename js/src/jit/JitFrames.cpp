@@ -159,7 +159,20 @@ JitFrameIterator::checkInvalidation(IonScript** ionScriptOut) const
     if (!invalidated)
         return false;
 
+#if defined(VARAN_THUMB2)
+    // ★ C5 -- the READ half of the pair whose WRITE is Assembler::PatchWrite_Imm32 (arm/Assembler-arm.cpp).
+    // On Thumb-2 returnAddr is ODD, so `((int32_t*)returnAddr)[-1]` read at evenRA-3 -- a misaligned
+    // load that is one byte off the reserved slot [evenRA-4 .. evenRA-1]. It "worked" only because the
+    // writer used the same odd base, so both sides addressed the same wrong word.
+    // ⚠️ Mask ONLY the slot address, exactly as the writer does. The `returnAddr + invalidationDataOffset`
+    // below MUST keep the odd base: delta was computed as epilogueDataOffset - (oddRA - codeRaw), so
+    // oddRA + delta = codeRaw + epilogueDataOffset -- the odd bit cancels and the result is already
+    // correct. Masking that line too would break a currently-correct value (verified by audit + algebra).
+    uint8_t* varanSlotBase = (uint8_t*)(uintptr_t(returnAddr) & ~uintptr_t(1));
+    int32_t invalidationDataOffset = ((int32_t*) varanSlotBase)[-1];
+#else
     int32_t invalidationDataOffset = ((int32_t*) returnAddr)[-1];
+#endif
     uint8_t* ionScriptDataOffset = returnAddr + invalidationDataOffset;
     IonScript* ionScript = (IonScript*) Assembler::GetPointer(ionScriptDataOffset);
     MOZ_ASSERT(ionScript->containsReturnAddress(returnAddr));

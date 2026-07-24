@@ -146,12 +146,16 @@ js::ThisThread::SetName(const char* name)
   info.dwThreadID = GetCurrentThreadId();
   info.dwFlags = 0;
 
+#if !defined(_M_ARM)
+  // ARM32/UWP build spike: clang-cl cannot lower SEH (__try/__except) for thumbv7.
+  // This is the debugger thread-naming trick and is non-essential; skip on ARM.
   __try {
     RaiseException(THREAD_NAME_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR),
                    (ULONG_PTR*)&info);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     // Do nothing.
   }
+#endif
 #endif
 }
 
