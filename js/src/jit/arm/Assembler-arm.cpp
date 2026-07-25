@@ -689,6 +689,9 @@ Imm16::Imm16()
 #if defined(VARAN_THUMB2)
 // Shared 2-slot jump writer (defined below near varanPatchCondBranch2); forward-declared for PatchJump.
 static void VaranComputeJump2(intptr_t s0, intptr_t target, uint32_t condField, uint32_t* w0, uint32_t* w1);
+// ★2 FIX -- the matching READER. The stored condition is NOT always the logical one; see the
+// definition (next to the writer) for the mechanism and the device evidence.
+static uint32_t VaranLogicalCondOfPatchSite(const uint32_t* w0, const uint32_t* w1);
 #endif
 
 void
@@ -702,8 +705,11 @@ jit::PatchJump(CodeLocationJump& jump_, CodeLocationLabel label, ReprotectCode r
     // NOT route through the pool/InstLDR far path (device-lethal A32); >+-16MB trips VaranComputeJump2.
     uint32_t* w0 = reinterpret_cast<uint32_t*>(jump_.raw());
     uint32_t* w1 = w0 + 1;
-    uint32_t cf = 14u;
-    VaranDecodeBranchCond(*w0, &cf);
+    // ★2 FIX: recover the LOGICAL condition, not the stored field. Reading slot0 raw was the
+    // defect -- the far arm stores the INVERTED condition there, so the next patch of the same
+    // site re-encoded with the wrong sense. VaranLogicalCondOfPatchSite uses slot1 to tell the
+    // two forms apart and crashes loudly on anything else.
+    uint32_t cf = VaranLogicalCondOfPatchSite(w0, w1);
     intptr_t s0 = reinterpret_cast<intptr_t>(w0);
     intptr_t target = reinterpret_cast<intptr_t>(label.raw());
     MaybeAutoWritableJitCode awjc(reinterpret_cast<void*>(w0), 2 * sizeof(uint32_t), reprotect);
@@ -4079,6 +4085,60 @@ VaranComputeJump2(intptr_t s0, intptr_t target, uint32_t condField, uint32_t* w0
     }
 }
 
+// ★2 FIX (2026-07-25) -- recover the LOGICAL condition of a 2-slot patchable site.
+//
+// THE DEFECT. VaranComputeJump2 has two conditional forms and they disagree about what slot0's
+// condition field means:
+//     near (<= +-1MB) : slot0 = B<c>.W(target)    slot1 = NOP.W        -> stored == logical
+//     far  (>  +-1MB) : slot0 = B<!c>.W(+4)       slot1 = B.W(target)  -> stored == INVERTED
+// The far form MUST invert -- a branch-over has to test !c to skip slot1 -- so the inversion is
+// correct in isolation. What was wrong is that PatchJump re-derived the condition by reading
+// slot0 RAW on every patch. A site is patched more than once (IonCaches patches each next-stub
+// jump twice; Ion loop backedges are re-patched on every interrupt toggle), so once one patch
+// had taken the far arm, every later patch of that site used the inverted sense -- and, because
+// each patch re-reads what the previous one wrote, the site never recovered.
+//
+// DEVICE EVIDENCE (Run C, 2026-07-25, the first FullMemory dump). An IonCache stub whose shape
+// guard is emitted with Assembler::NotEqual was running as `beq.w`:
+//     cmp.w  lr, r12          ; shape guard
+//     beq.w  +0x9464          ; slot0  <- inverted: branches away when the shape MATCHES
+//     nop.w                   ; slot1  <- near form
+//     ldr.w  r3, [r0, #0x8]   ; slots_          <- stub body, entered on the WRONG shape
+//     ldr.w  r2, [r3, #0x4]   ; FAULT, r3 = 0
+// An object with only fixed slots has slots_ == nullptr, so the body read address 4 -- exactly
+// the observed c0000005 at faultVA 0x00000004.
+//
+// WHY slot1 IS AN EXACT DISCRIMINATOR AND NOT A HEURISTIC. VaranComputeJump2 writes BOTH slots
+// on every patch, and it is the only writer of these sites, so slot1 is always either
+// VARAN_NOPW_WORD or a T4 (unconditional) B.W. Reading it back IS reading back which form the
+// writer chose -- the same relationship W1 relies on for the 1-slot/2-slot discrimination.
+//
+// ⚠️ THE `else` IS A MOZ_CRASH, DELIBERATELY. MOZ_DEBUG is EMPTY in the device build, so a
+// MOZ_ASSERT here would not exist on the only machine that matters. An unrecognised slot1 means
+// the site is not what this function believes it is, and mispatching it silently is how we got
+// here in the first place.
+static uint32_t
+VaranLogicalCondOfPatchSite(const uint32_t* w0, const uint32_t* w1)
+{
+    uint32_t cf = 14u;
+    if (!VaranDecodeBranchCond(*w0, &cf) || cf >= 14) {
+        // Unconditional site (T4 B.W) -- VaranComputeJump2's condField >= 14 arm. Nothing to
+        // recover, and slot1 must NOT be inspected: on a synthesized 1-slot RepatchLabel site
+        // (wasmEmitTrapOutOfLineCode) slot0+4 is someone else's instruction. That is W1.
+        return 14u;
+    }
+    if (*w1 == VARAN_NOPW_WORD)
+        return cf;                                    // near form: stored field IS the logical one
+    uint32_t c1 = 14u;
+    if (VaranBranchKind(*w1) == 1 && VaranDecodeBranchCond(*w1, &c1) && c1 >= 14) {
+        // far form: slot0 holds !c and slot1 is the unconditional B.W to the real target.
+        return uint32_t(Assembler::InvertCondition(Assembler::Condition(cf << 28))) >> 28;
+    }
+    // ASCII only in the literal: this string lands in the binary and is read off a device.
+    MOZ_CRASH("VARAN *2: 2-slot patchable site has an unrecognized slot1 "
+              "(expected NOP.W or an unconditional B.W)");
+}
+
 void
 Assembler::varanPatchCondBranch2(BufferOffset slot0, int32_t target, Condition c)
 {
@@ -4757,6 +4817,29 @@ Assembler::bind(RepatchLabel* label)
             editSrc(slot0)->varanSetRaw(w0);
             (void)w1;   // deliberately NOT written -- it may be someone else's instruction
         } else {
+            // ★2 (2026-07-25) -- a loud "is this site already in the far form?" check was TRIED
+            // HERE and REMOVED, because it cannot be made sound at this site. Recorded so nobody
+            // adds it back:
+            //
+            // The check would have to read slot0+4 to tell the near form from the far form. But
+            // `cf < 14` does NOT imply the site is 2-slot: wasmEmitTrapOutOfLineCode synthesizes a
+            // RepatchLabel over a site it did not create (`jump.use(site.codeOffset)`), and the W1
+            // note above says those come in BOTH shapes -- `jump(TrapDesc)` is Always, while
+            // `branch32(AboveOrEqual, ..., oobTrap)` is conditional. For a conditional synthesized
+            // site, slot0+4 is SOMEONE ELSE'S INSTRUCTION, and it can decode as an unconditional
+            // B.W. Measured: the check fired on 5 wasm/asm.js jit-tests (debug/Script-format-01,
+            // debug/bug1257045, debug/wasm-01, debug/wasm-02, saved-stacks/asm-frames) -- all
+            // false positives. This is the same slot1 ambiguity that killed the first fix design;
+            // it is genuinely absent at PatchJump (whose targets are all real 2-slot sites) and
+            // genuinely present here.
+            //
+            // ⚠️ WHAT THE FAILED CHECK EXPOSED, AND IT IS A REAL PRE-EXISTING DEFECT: for exactly
+            // those conditional synthesized sites, this arm calls varanPatchCondBranch2, which
+            // WRITES slot0+4 -- i.e. it overwrites an unrelated instruction. That is precisely the
+            // "ACTIVE MEMORY CORRUPTION" the W1 fix above was written to stop, still live for the
+            // CONDITIONAL shape because W1 discriminates on `cf >= 14` alone. Not a device risk
+            // today (wasm and asm.js are off in the shipping build) and NOT introduced by ★2, so it
+            // is left alone here rather than fixed blind -- but it needs its own batch.
             varanPatchCondBranch2(slot0, dest.getOffset(), Condition(cf << 28));
         }
     }

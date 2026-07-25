@@ -36,6 +36,7 @@
 # include "jit/MacroAssembler.h"      // VARAN P1.2b: bind() end-to-end test drives a real MacroAssembler
 # include "jit/Ion.h"                 // VARAN Batch 4: AutoFlushICache for the pool executableCopy test
 # include "jit/Linker.h"              // VARAN 2026-07-24: real JitCode, so real PatchJump can be called
+# include "jit/JitCompartment.h"      // VARAN 2026-07-25: AutoWritableJitCode, to corrupt slot1 on purpose
 #endif
 #include "js/Debug.h"
 #include "js/HashTable.h"
@@ -5155,6 +5156,13 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
     // scaffolding counted as a product defect that way.
     //   mode 0 = FAR then NEAR  (the *2 trigger: patch #1 takes the overflow arm)
     //   mode 1 = NEAR then NEAR (control: the overflow arm is never taken, condition must survive)
+    //   mode 2 = FAR then FAR
+    //   mode 3 = FAR, NEAR, FAR, NEAR  (the absorbing sequence -- the shape Ion loop backedges
+    //            produce, where the site is re-patched on every interrupt toggle)
+    //   mode 4 = NEAR only (single patch)
+    //   mode 5 = corrupt slot1, then patch -- MUST hit the loud MOZ_CRASH. Graded by EXIT CODE
+    //            from outside, poscontrol-style; a returned value would mean it did not crash.
+    // Returns "slot0:slot1,slot0:slot1,..." -- one pair per patch, in order.
     using namespace js::jit;
     CallArgs args = CallArgsFromVp(argc, vp);
     if (args.length() < 1 || !args[0].isInt32()) {
@@ -5185,21 +5193,48 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
     if (!code) { args.rval().setInt32(-4); return true; }
 
     CodeLocationJump jump(code, j);
-    const uint32_t* w = reinterpret_cast<const uint32_t*>(jump.raw());
+    uint32_t* w = reinterpret_cast<uint32_t*>(jump.raw());
+    uint8_t* farTarget  = reinterpret_cast<uint8_t*>(w) + (2 << 20);  // +2MB => forces the overflow arm
+    uint8_t* nearTarget = code->raw() + 4;
 
-    // PATCH #1.
-    uint8_t* t1 = (mode == 0)
-        ? (reinterpret_cast<uint8_t*>(const_cast<uint32_t*>(w)) + (2 << 20))  // +2MB => forces the overflow arm
-        : (code->raw() + 4);                                                   // near
-    PatchJump(jump, CodeLocationLabel(t1));
-    uint32_t w0a = w[0], w1a = w[1];
+    // The patch schedule per mode. 0 = in-range, 1 = out-of-range (the overflow arm).
+    // NB: the members are `useFar`, not `far` -- <windef.h> still #defines `far` and `near`
+    // as empty Win16 leftovers, so a member named `far` expands to nothing and produces a
+    // cascade of "expected member name" / "excess elements in struct initializer".
+    static const struct { int n; int useFar[4]; } kSched[] = {
+        { 2, { 1, 0, 0, 0 } },   // 0: far, near      -- the original red case
+        { 2, { 0, 0, 0, 0 } },   // 1: near, near     -- control
+        { 2, { 1, 1, 0, 0 } },   // 2: far, far
+        { 4, { 1, 0, 1, 0 } },   // 3: far, near, far, near -- the absorbing sequence
+        { 1, { 0, 0, 0, 0 } },   // 4: near only
+        { 1, { 0, 0, 0, 0 } },   // 5: near, but slot1 is corrupted first -> must MOZ_CRASH
+    };
+    if (mode < 0 || mode > 5) { args.rval().setInt32(-5); return true; }
 
-    // PATCH #2 -- always near, so an honest implementation must emit B<Equal>.W(target) here.
-    PatchJump(jump, CodeLocationLabel(code->raw() + 4));
-    uint32_t w0b = w[0], w1b = w[1];
+    if (mode == 5) {
+        // Corrupt slot1 to a word that is neither NOP.W nor an unconditional B.W. The loud
+        // check must fire; if this function RETURNS at all, the check is missing or is an
+        // assert (and asserts do not exist in the device build, which is the whole point).
+        // ⚠️ Use the raw protection primitives, NOT AutoWritableJitCode. That RAII class also
+        // flips runtime state (toggleAutoWritableJitCodeActive + AutoPreventBackedgePatching)
+        // and is not re-entrant -- Runtime.h:1211 asserts on nesting. A first attempt used it
+        // here and mode 5 exited nonzero for the WRONG REASON: the nesting assert, not our
+        // check. That is a false pass, and it is exactly why this case is graded on the
+        // MESSAGE as well as the exit code.
+        if (!ExecutableAllocator::makeWritable(reinterpret_cast<void*>(w), 2 * sizeof(uint32_t)))
+            MOZ_CRASH("varanT2PatchJumpTwice: makeWritable failed");
+        w[1] = 0xDEADBEEFu;
+        if (!ExecutableAllocator::makeExecutable(reinterpret_cast<void*>(w), 2 * sizeof(uint32_t)))
+            MOZ_CRASH("varanT2PatchJumpTwice: makeExecutable failed");
+    }
 
-    char buf[80];
-    snprintf(buf, sizeof(buf), "%08x,%08x,%08x,%08x", w0a, w1a, w0b, w1b);
+    char buf[160];
+    int pos = 0;
+    for (int i = 0; i < kSched[mode].n; i++) {
+        PatchJump(jump, CodeLocationLabel(kSched[mode].useFar[i] ? farTarget : nearTarget));
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%08x:%08x",
+                        i ? "," : "", w[0], w[1]);
+    }
     JSString* s = JS_NewStringCopyZ(cx, buf);
     if (!s)
         return false;
