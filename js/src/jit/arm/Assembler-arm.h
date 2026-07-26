@@ -1912,6 +1912,7 @@ class Assembler : public AssemblerShared
     // Batch-4 2-slot jump-writer self-test: VaranComputeJump2 across Always/cond, in-range + >+-1MB
     // overflow fallback, with a decode round-trip. Returns failed-check count (0 = pass).
     static int varanJumpPatch2SelfTest();
+    static int varanFarJump3SelfTest();
 #endif
 
     // Label operations.

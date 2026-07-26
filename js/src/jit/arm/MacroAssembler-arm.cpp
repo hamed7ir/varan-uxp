@@ -4347,14 +4347,20 @@ CodeOffsetJump
 MacroAssemblerARMCompat::jumpWithPatch(RepatchLabel* label, Condition cond, Label* documentation)
 {
 #if defined(VARAN_THUMB2)
-    // Thumb-2 patchable jump = a fixed 2-slot reservation [slot0, slot0+4] (NOT a branch-pool load, which
-    // would be device-lethal A32). slot0 = B<c>.W condition-carrier placeholder (byteVal 0 -> a harmless
-    // self-relative branch; the real cond is recovered later from this word); slot1 = NOP.W. bind()
-    // (assembly-time) and PatchJump (post-link) both fill the pair via VaranComputeJump2 -- in-range ->
-    // B<c>.W+NOP.W, >+-1MB -> invert+B.W (reaches +-16MB). CodeOffsetJump carries no condition, so cond
-    // must be recovered from slot0; jumpTableIndex is a dummy 0 (no pool entry). backedgeJump inherits
-    // this (Always). Retires the EncodeBccT2 loud guard: no caller now feeds >+-1MB into a 1-slot B<c>.W.
-    // ★ A1 POOL GUARD (F1 class, 5th instance). N=2: slot0 (writeBranchInstT2) + slot1 (writeInstT2).
+    // Thumb-2 patchable jump = a fixed 3-slot reservation [slot0, slot0+4, slot0+8] (NOT a branch-pool
+    // load, which would be device-lethal A32). slot0 = B<c>.W condition-carrier placeholder (byteVal 0
+    // -> a harmless self-relative branch; the real cond is recovered later from this word); slot1 and
+    // slot2 = NOP.W. bind() (assembly-time) fills slot0/slot1 via VaranComputeJump2 and leaves slot2's
+    // NOP.W alone -- correct, because an assembly-time distance is always within reach. PatchJump
+    // (post-link) fills all three: in-range -> VaranComputeJump2 as before with slot2 = NOP.W;
+    // >+-16MB -> the (D)-uniform far form, whose target literal lives in slot2 and is reached by
+    // `ldr.w pc,[pc,#imm]`. CodeOffsetJump carries no condition, so cond must be recovered from slot0;
+    // jumpTableIndex is a dummy 0 (no pool entry -- deliberately, see VaranWriteFarJump3). backedgeJump
+    // inherits this (Always).
+    //
+    // ★ THE THIRD SLOT IS THE WHOLE COST OF (D)-uniform: +4 bytes per patchable site buys a jump with
+    // NO range limit, replacing two MOZ_RELEASE_ASSERTs that aborted the browser on a normal retarget.
+    // ★ A1 POOL GUARD (F1 class, 5th instance). N=3: slot0 (writeBranchInstT2) + slot1 + slot2.
     // Without it the buffer can flush a constant pool BETWEEN the two writes; the pool's GUARD B.W
     // then occupies slot0+4, and bind()/PatchJump -- which fill the pair via varanPatchCondBranch2 /
     // VaranComputeJump2 at [slot0, slot0+4] -- would OVERWRITE the pool guard, dropping execution
@@ -4370,11 +4376,12 @@ MacroAssemblerARMCompat::jumpWithPatch(RepatchLabel* label, Condition cond, Labe
     // PatchJump both read slot0+4), and the corpus is a poor proxy for the IonCaches next-stub
     // path that exercises this most. A bisect confirmed it is NOT the cause of the unaligned-read
     // or far-jump signatures that appeared with Front A -- those survive its removal.
-    VaranForbidPoolsIfOutermost varanAfp(this, 2);
+    VaranForbidPoolsIfOutermost varanAfp(this, 3);
     BufferOffset slot0 =
         writeBranchInstT2(VaranEncodeBranchInst(/*isBL=*/false, /*byteVal=*/0, uint32_t(cond) >> 28),
                           documentation);
     writeInstT2(0x8000F3AFu);                            // slot1 reservation (NOP.W)
+    writeInstT2(0x8000F3AFu);                            // slot2 reservation (NOP.W / far literal)
     if (!oom())
         label->use(slot0.getOffset());
     return CodeOffsetJump(slot0.getOffset(), 0);

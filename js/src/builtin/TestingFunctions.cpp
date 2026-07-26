@@ -5084,6 +5084,14 @@ VaranT2JumpPatch(JSContext* cx, unsigned argc, Value* vp)
     int fails = 0;
     auto check = [&](bool ok) { if (!ok) fails++; };
 
+    // POSITIVE CONTROL. varanT2JumpPatch(1) injects exactly ONE wrong expectation, into the
+    // heaviest check here -- the simulator EXECUTION of the far-Always form, which builds a
+    // program, runs it under the sim and compares the returned value. A run that does not then
+    // report exactly 1 has a dead checker, and every 0 this function ever printed is void.
+    // This exists because the alternative -- "it returned 0, so it works" -- is unfalsifiable, and
+    // this project has already shipped one green that was a nesting assert in disguise.
+    const bool poscontrol = args.length() >= 1 && args[0].isInt32() && args[0].toInt32() == 1;
+
     // (A) shared writer self-test (includes the >+-1MB invert+B.W overflow fallback).
     check(Assembler::varanJumpPatch2SelfTest() == 0);
 
@@ -5125,6 +5133,61 @@ VaranT2JumpPatch(JSContext* cx, unsigned argc, Value* vp)
         check(!masm.oom());
         check(landing(js.offset()) == Soff);
     }
+
+    // (C) (D)-uniform: the 3-slot FAR form, plus the ★2 reader over ALL FOUR shapes for every
+    // condition, plus the range predicate at its exact boundaries. See varanFarJump3SelfTest.
+    check(Assembler::varanFarJump3SelfTest() == 0);
+
+    // (D) EXECUTION proof of both far shapes under the simulator.
+    //
+    // WHY THIS EXISTS SEPARATELY FROM (C). (C) proves the WORDS are what we intend, and PatchJump's
+    // red test (varanT2PatchJumpTwice modes 6-9) proves PatchJump EMITS them for a >+-16MB target.
+    // Neither one proves the form actually TRANSFERS CONTROL -- and it cannot be proven the same way
+    // the near forms are, because a >16MB retarget is not reachable on this host (the largest real
+    // separation ever measured on the sim is 8.89MB). The distance is irrelevant to whether the form
+    // works, though: both shapes use FIXED immediates and carry the whole target in the slot2 literal,
+    // so a near literal exercises byte-for-byte the same instructions as a far one. Hand-lay them at a
+    // reachable distance and RUN them; the two halves compose.
+    //
+    // Non-vacuous: if the load read slot1 instead of slot2 (the A32 -8 bias, which is the classic way
+    // to get this wrong), it would load NOP.W / the branch word and jump to a nonsense address, and
+    // the sim's interwork check or its loud unknown-opcode arm would fire. A wrong Thumb bit is caught
+    // by varanCheckInterworkTarget on the `rt == 15` path.
+    {
+        Simulator* sim = cx->runtime()->simulator();
+        // -- far-ALWAYS: ldr.w pc,[pc,#4] / NOP.W / literal -> a stub returning 0xCAFEBABE.
+        {
+            alignas(4) uint32_t prog[6];
+            uintptr_t base = reinterpret_cast<uintptr_t>(prog);
+            prog[0] = 0xF004F8DFu;              //  0: ldr.w pc,[pc,#4]   -> Align(0+4,4)+4 = 8
+            prog[1] = 0x8000F3AFu;              //  4: nop.w              (slot1, never executed)
+            prog[2] = uint32_t(base + 12) | 1u; //  8: slot2 literal      (Thumb bit set)
+            prog[3] = 0x0004F8DFu;              // 12: ldr r0,[pc,#4]     -> Align(12+4,4)+4 = 20
+            prog[4] = 0x4770bf00u;              // 16: nop16 ; bx lr
+            prog[5] = 0xCAFEBABEu;              // 20: the value r0 must come back with
+            uint8_t* entry = reinterpret_cast<uint8_t*>(base | 1);
+            check(uint32_t(sim->call(entry, 1, 0)) == (poscontrol ? 0xCAFEBABFu : 0xCAFEBABEu));
+        }
+        // -- far-CONDITIONAL (logical EQ): B<!c>.W(+8) / ldr.w pc,[pc,#0] / literal. Both paths are
+        // exercised, so this also proves the SENSE is right -- a swapped condition would return the
+        // other constant rather than crashing, which is exactly the ★2 failure mode.
+        {
+            alignas(4) uint32_t prog[9];
+            uintptr_t base = reinterpret_cast<uintptr_t>(prog);
+            prog[0] = 0x0F00F1B0u;              //  0: cmp.w r0,#0        (Z := (arg == 0))
+            prog[1] = 0x8004F040u;              //  4: bne.w #8           -> 16, skipping the site
+            prog[2] = 0xF000F8DFu;              //  8: ldr.w pc,[pc,#0]   -> Align(8+4,4)+0 = 12
+            prog[3] = uint32_t(base + 20) | 1u; // 12: slot2 literal      (Thumb bit set)
+            prog[4] = 0xB804F000u;              // 16: b.w #8             -> 28 (the not-taken stub)
+            prog[5] = 0x50A5F24Au;              // 20: movw r0,#0xa5a5    TAKEN
+            prog[6] = 0x4770bf00u;              // 24: nop16 ; bx lr
+            prog[7] = 0x205AF645u;              // 28: movw r0,#0x5a5a    NOT TAKEN
+            prog[8] = 0x4770bf00u;              // 32: nop16 ; bx lr
+            uint8_t* entry = reinterpret_cast<uint8_t*>(base | 1);
+            check(uint32_t(sim->call(entry, 1, 0)) == 0xa5a5u);   // arg 0 -> EQ holds  -> branch taken
+            check(uint32_t(sim->call(entry, 1, 1)) == 0x5a5au);   // arg 1 -> EQ fails  -> falls past
+        }
+    }
     args.rval().setInt32(fails);
     return true;
 }
@@ -5162,7 +5225,17 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
     //   mode 4 = NEAR only (single patch)
     //   mode 5 = corrupt slot1, then patch -- MUST hit the loud MOZ_CRASH. Graded by EXIT CODE
     //            from outside, poscontrol-style; a returned value would mean it did not crash.
-    // Returns "slot0:slot1,slot0:slot1,..." -- one pair per patch, in order.
+    //
+    // (D)-uniform 2026-07-25 -- the >+-16MB modes. BEFORE the fix these tripped
+    // VaranComputeJump2's MOZ_RELEASE_ASSERT ("out of +-16MB reach"), i.e. they are the RED test for
+    // the VaranBwInRange abort, and they must be shown failing on BOTH arms first.
+    //   mode 6 = FAR3 then NEAR  (conditional site)
+    //   mode 7 = FAR3 then FAR3 to a DIFFERENT target (conditional) -- the RE-PATCH case: slot2's
+    //            literal must be REWRITTEN, and slot0/slot1 must still be the skip+load pair. The
+    //            failure this rules out is a B.W being written over the load.
+    //   mode 8 = FAR3 then NEAR  (Always site)
+    //   mode 9 = FAR3 then FAR3 to a different target (Always) -- re-patch, far-Always shape.
+    // Returns "slot0:slot1:slot2,..." for modes 6-9 (three words: the literal is the point).
     using namespace js::jit;
     CallArgs args = CallArgsFromVp(argc, vp);
     if (args.length() < 1 || !args[0].isInt32()) {
@@ -5177,10 +5250,33 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
     AutoFlushICache afc("varanT2PatchJumpTwice");
     MacroAssembler masm;
 
-    // Lay the 2-slot conditional patchable site with a KNOWN condition, then bind it (that is the
-    // shape IonCaches produces: jumpWithPatch -> bind -> PatchJump -> PatchJump).
+    // The patch schedule per mode. kind: 0 = in-range, 1 = >+-1MB (the 2-slot invert+B.W arm),
+    // 2 = >+-16MB (the (D)-uniform 3-slot far arm; each occurrence uses a DIFFERENT target so a
+    // re-patch has to rewrite the slot2 literal). `always` picks the Always site over the Equal one.
+    // NB: the member is `useFar`, not `far` -- <windef.h> still #defines `far` and `near`
+    // as empty Win16 leftovers, so a member named `far` expands to nothing and produces a
+    // cascade of "expected member name" / "excess elements in struct initializer".
+    static const struct { int n; int always; int useFar[4]; } kSched[] = {
+        { 2, 0, { 1, 0, 0, 0 } },   // 0: far, near      -- the original ★2 red case
+        { 2, 0, { 0, 0, 0, 0 } },   // 1: near, near     -- control
+        { 2, 0, { 1, 1, 0, 0 } },   // 2: far, far
+        { 4, 0, { 1, 0, 1, 0 } },   // 3: far, near, far, near -- the absorbing sequence
+        { 1, 0, { 0, 0, 0, 0 } },   // 4: near only
+        { 1, 0, { 0, 0, 0, 0 } },   // 5: near, but slot1 is corrupted first -> must MOZ_CRASH
+        { 2, 0, { 2, 0, 0, 0 } },   // 6: FAR3, near     (conditional)
+        { 2, 0, { 2, 2, 0, 0 } },   // 7: FAR3, FAR3     (conditional) -- the RE-PATCH case
+        { 2, 1, { 2, 0, 0, 0 } },   // 8: FAR3, near     (Always)
+        { 2, 1, { 2, 2, 0, 0 } },   // 9: FAR3, FAR3     (Always) -- re-patch, far-Always shape
+    };
+    if (mode < 0 || mode > 9) { args.rval().setInt32(-5); return true; }
+    const bool useAlways = kSched[mode].always != 0;
+
+    // Lay the conditional patchable site with a KNOWN condition, then bind it (that is the shape
+    // IonCaches produces: jumpWithPatch -> bind -> PatchJump -> PatchJump). Modes 8-9 need an
+    // unconditional site instead -- the far-Always shape has no condition to recover, and its slot0
+    // is the load itself, so it exercises a different arm of the ★2 reader.
     RepatchLabel R;
-    CodeOffsetJump j = masm.jumpWithPatch(&R, Assembler::Equal);
+    CodeOffsetJump j = masm.jumpWithPatch(&R, useAlways ? Assembler::Always : Assembler::Equal);
     for (int i = 0; i < 4; i++)
         masm.as_movw(r0, Imm16(0));
     masm.bind(&R);
@@ -5196,20 +5292,12 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
     uint32_t* w = reinterpret_cast<uint32_t*>(jump.raw());
     uint8_t* farTarget  = reinterpret_cast<uint8_t*>(w) + (2 << 20);  // +2MB => forces the overflow arm
     uint8_t* nearTarget = code->raw() + 4;
-
-    // The patch schedule per mode. 0 = in-range, 1 = out-of-range (the overflow arm).
-    // NB: the members are `useFar`, not `far` -- <windef.h> still #defines `far` and `near`
-    // as empty Win16 leftovers, so a member named `far` expands to nothing and produces a
-    // cascade of "expected member name" / "excess elements in struct initializer".
-    static const struct { int n; int useFar[4]; } kSched[] = {
-        { 2, { 1, 0, 0, 0 } },   // 0: far, near      -- the original red case
-        { 2, { 0, 0, 0, 0 } },   // 1: near, near     -- control
-        { 2, { 1, 1, 0, 0 } },   // 2: far, far
-        { 4, { 1, 0, 1, 0 } },   // 3: far, near, far, near -- the absorbing sequence
-        { 1, { 0, 0, 0, 0 } },   // 4: near only
-        { 1, { 0, 0, 0, 0 } },   // 5: near, but slot1 is corrupted first -> must MOZ_CRASH
-    };
-    if (mode < 0 || mode > 5) { args.rval().setInt32(-5); return true; }
+    // >+-16MB: the distance VaranComputeJump2 cannot encode at all. SYNTHETIC, and that is sound
+    // here -- PatchJump, jumpWithPatch, CodeLocationJump and the JitCode are all real, and the only
+    // thing the encoders consume is `target - (s0 + k)`, a DISTANCE. A synthetic distance drives
+    // byte-for-byte the same code as a real one; nothing dereferences the target. (The far form is
+    // separately proven to EXECUTE, at a reachable distance, in varanT2JumpPatch part (D).)
+    uint8_t* far3Target = reinterpret_cast<uint8_t*>(w) + (17 << 20);   // +17MB
 
     if (mode == 5) {
         // Corrupt slot1 to a word that is neither NOP.W nor an unconditional B.W. The loud
@@ -5221,19 +5309,38 @@ VaranT2PatchJumpTwice(JSContext* cx, unsigned argc, Value* vp)
         // here and mode 5 exited nonzero for the WRONG REASON: the nesting assert, not our
         // check. That is a false pass, and it is exactly why this case is graded on the
         // MESSAGE as well as the exit code.
-        if (!ExecutableAllocator::makeWritable(reinterpret_cast<void*>(w), 2 * sizeof(uint32_t)))
+        if (!ExecutableAllocator::makeWritable(reinterpret_cast<void*>(w), 3 * sizeof(uint32_t)))
             MOZ_CRASH("varanT2PatchJumpTwice: makeWritable failed");
         w[1] = 0xDEADBEEFu;
-        if (!ExecutableAllocator::makeExecutable(reinterpret_cast<void*>(w), 2 * sizeof(uint32_t)))
+        if (!ExecutableAllocator::makeExecutable(reinterpret_cast<void*>(w), 3 * sizeof(uint32_t)))
             MOZ_CRASH("varanT2PatchJumpTwice: makeExecutable failed");
     }
 
-    char buf[160];
+    char buf[256];
     int pos = 0;
+    // Modes 6-9 lead with the SITE ADDRESS so the outside grader can check the slot2 literal
+    // exactly (site + 17MB | 1) instead of only checking that it looks plausible. Modes 0-5 keep
+    // their original output byte-for-byte, so their recorded ★2 expectations do not move.
+    if (mode >= 6)
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "@%08x;", unsigned(uintptr_t(w)));
     for (int i = 0; i < kSched[mode].n; i++) {
-        PatchJump(jump, CodeLocationLabel(kSched[mode].useFar[i] ? farTarget : nearTarget));
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%08x:%08x",
-                        i ? "," : "", w[0], w[1]);
+        int kind = kSched[mode].useFar[i];
+        // Each FAR3 occurrence gets its own target, so a re-patch MUST rewrite the slot2 literal;
+        // if it instead left the old literal in place the two triples would be identical and the
+        // outside grader would see it.
+        uint8_t* t = (kind == 2) ? far3Target + i * 0x1000
+                   : (kind == 1) ? farTarget
+                                 : nearTarget;
+        PatchJump(jump, CodeLocationLabel(t));
+        // Modes 6-9 print all THREE words -- the literal is the thing under test. Modes 0-5 keep
+        // their original two-word output byte-for-byte, so their expected strings do not move.
+        if (kind == 2 || mode >= 6) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%08x:%08x:%08x",
+                            i ? "," : "", w[0], w[1], w[2]);
+        } else {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%08x:%08x",
+                            i ? "," : "", w[0], w[1]);
+        }
     }
     JSString* s = JS_NewStringCopyZ(cx, buf);
     if (!s)

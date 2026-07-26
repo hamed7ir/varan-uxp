@@ -687,34 +687,74 @@ Imm16::Imm16()
 { }
 
 #if defined(VARAN_THUMB2)
+// NOP.W = 0xF3AF8000 -> stored word 0x8000F3AF (oracle-verified). Defined here rather than beside the
+// other branch words further down because jit::PatchJump (immediately below) needs it.
+static const uint32_t VARAN_NOPW_WORD = 0x8000F3AFu;
+// The two `ldr.w pc,[pc,#imm]` words used by the 3-slot FAR patchable jump ((D)-uniform, 2026-07-25).
+// LDR (literal) T2: hw0 = 0xF85F | (U << 7) -> 0xF8DF for U=1; hw1 = (Rt << 12) | imm12 with Rt = pc.
+// Identical to what the in-tree EncodeDtr T2 arm produces -- one encoder, not two.
+//
+// BYTE-CHECKED against clang's integrated assembler BEFORE this design moved any code
+// (varan-jit/tools/t2oracle.sh; full record in varan-jit/BWINRANGE-STEP0-ORACLE.md):
+//     ldr.w pc,[pc,#4]  ->  df f8 04 f0     ldr.w pc,[pc,#0]  ->  df f8 00 f0
+// and, more to the point, llvm's own literal RESOLUTION picks exactly these immediates when the
+// literal is at slot2 -- which is the real claim, since T2 reads PC as Align(insn+4,4) (bias -4)
+// where A32 reads insn+8 (bias -8), and getting that wrong shifts the whole layout:
+//     ldr.w pc,1f ; nop.w ; 1:.word            -> imm12 = 4   (load at slot0, literal at slot2)
+//     b<!c>.w 2f ; ldr.w pc,1f ; 1:.word ; 2:  -> imm12 = 0   (load at slot1, literal at slot2)
+// So BOTH far shapes read their target from slot2. That uniformity is deliberate.
+static const uint32_t VARAN_LDRPCPC4_WORD = 0xF004F8DFu;   // at slot0: reads slot2
+static const uint32_t VARAN_LDRPCPC0_WORD = 0xF000F8DFu;   // at slot1: reads slot2
 // Shared 2-slot jump writer (defined below near varanPatchCondBranch2); forward-declared for PatchJump.
 static void VaranComputeJump2(intptr_t s0, intptr_t target, uint32_t condField, uint32_t* w0, uint32_t* w1);
 // ★2 FIX -- the matching READER. The stored condition is NOT always the logical one; see the
 // definition (next to the writer) for the mechanism and the device evidence.
 static uint32_t VaranLogicalCondOfPatchSite(const uint32_t* w0, const uint32_t* w1);
+// (D)-uniform -- the >+-16MB arm, and the predicate that selects it. Family A (PatchJump) only.
+static void VaranWriteFarJump3(intptr_t target, uint32_t condField,
+                               uint32_t* w0, uint32_t* w1, uint32_t* w2);
+static bool VaranJump2CanEncode(intptr_t s0, intptr_t target, uint32_t condField);
 #endif
 
 void
 jit::PatchJump(CodeLocationJump& jump_, CodeLocationLabel label, ReprotectCode reprotect)
 {
 #if defined(VARAN_THUMB2)
-    // The patchable jump is the reserved 2-slot site [slot0, slot0+4] laid by jumpWithPatch. Recover the
-    // condition from slot0 and rewrite the pair with VaranComputeJump2 (in-range B<c>.W+NOP.W, or the
-    // overflow invert+B.W). Reprotect + flush BOTH slots (8 bytes) -- device FACT: FlushInstructionCache
-    // is mandatory and the I-cache is not auto-coherent, so a 4-byte flush would leave slot1 stale. Do
-    // NOT route through the pool/InstLDR far path (device-lethal A32); >+-16MB trips VaranComputeJump2.
+    // The patchable jump is the reserved 3-slot site [slot0, slot0+4, slot0+8] laid by jumpWithPatch.
+    // Recover the condition from the site and rewrite all three words. In VaranComputeJump2's reach
+    // (Always <= +-16MB, conditional <= +-1MB direct or <= +-16MB via invert+B.W) it writes slot0/slot1
+    // exactly as before and slot2 is NOP.W; beyond that, the (D)-uniform far form puts the target in
+    // slot2 and reaches it with `ldr.w pc,[pc,#imm]`, which has no range limit. Do NOT route through
+    // the upstream pool/InstLDR far path (device-lethal A32) -- the far form here allocates no pool
+    // entry, which is the entire reason it was chosen over a pool-backed design.
+    //
+    // Reprotect + flush ALL THREE slots (12 bytes) -- device FACT: FlushInstructionCache is mandatory
+    // and the I-cache is NOT auto-coherent, so a short flush would leave a stale word. slot2 is data
+    // read through the load, but it shares an I-cache line with the code, so it must be in the flush
+    // range too; FlushInstructionCache cleans D-cache and invalidates I-cache, which covers it.
     uint32_t* w0 = reinterpret_cast<uint32_t*>(jump_.raw());
     uint32_t* w1 = w0 + 1;
+    uint32_t* w2 = w0 + 2;
     // ★2 FIX: recover the LOGICAL condition, not the stored field. Reading slot0 raw was the
-    // defect -- the far arm stores the INVERTED condition there, so the next patch of the same
+    // defect -- the far arms store the INVERTED condition there, so the next patch of the same
     // site re-encoded with the wrong sense. VaranLogicalCondOfPatchSite uses slot1 to tell the
-    // two forms apart and crashes loudly on anything else.
+    // forms apart and crashes loudly on anything else.
     uint32_t cf = VaranLogicalCondOfPatchSite(w0, w1);
     intptr_t s0 = reinterpret_cast<intptr_t>(w0);
     intptr_t target = reinterpret_cast<intptr_t>(label.raw());
-    MaybeAutoWritableJitCode awjc(reinterpret_cast<void*>(w0), 2 * sizeof(uint32_t), reprotect);
-    VaranComputeJump2(s0, target, cf, w0, w1);
-    AutoFlushICache::flush(uintptr_t(w0), 2 * sizeof(uint32_t));
+    // Both far shapes read their literal via `ldr.w pc,[pc,#imm]`, whose base is Align(PC,4). Every
+    // site is 4-aligned by construction (all T2 slots are 4-byte instructions; CodeAlignment is 8),
+    // but Align() would silently ABSORB a violation and read the wrong word -- so trip loudly instead.
+    // MOZ_RELEASE_ASSERT and not MOZ_ASSERT: MOZ_DEBUG is empty in the device build.
+    MOZ_RELEASE_ASSERT((s0 & 3) == 0, "VARAN: patchable jump site is not 4-aligned");
+    MaybeAutoWritableJitCode awjc(reinterpret_cast<void*>(w0), 3 * sizeof(uint32_t), reprotect);
+    if (VaranJump2CanEncode(s0, target, cf)) {
+        VaranComputeJump2(s0, target, cf, w0, w1);
+        *w2 = VARAN_NOPW_WORD;
+    } else {
+        VaranWriteFarJump3(target, cf, w0, w1, w2);
+    }
+    AutoFlushICache::flush(uintptr_t(w0), 3 * sizeof(uint32_t));
     return;
 #else
     // We need to determine if this jump can fit into the standard 24+2 bit
@@ -2140,7 +2180,8 @@ EncodeUdfT2(uint32_t code)
 // positive/negative/boundary offsets, Task A chain round-trip 12011 offsets / 0 failures. Do not
 // re-derive. `off` = target - (branch+4), even (Thumb-2 PC = insn+4). Returns (hw1<<16)|hw0 so a
 // little-endian store yields hw0 first. NOP.W = 0xF3AF8000 -> stored word 0x8000F3AF (oracle-verified).
-static const uint32_t VARAN_NOPW_WORD = 0x8000F3AFu;
+// (VARAN_NOPW_WORD and the two ldr.w-pc words are defined ABOVE, next to jit::PatchJump, which needs
+// them and comes first in this file.)
 // Byte-value sentinel carried in an unbound forward-branch's immediate field, marking the chain
 // TAIL. Chain links are previous-branch buffer offsets (small, >= 0, even); a real branch distance
 // is never read for validity (only chain links are). 0x00800000 mirrors the A32 BOffImm sentinel;
@@ -4085,6 +4126,78 @@ VaranComputeJump2(intptr_t s0, intptr_t target, uint32_t condField, uint32_t* w0
     }
 }
 
+// ---- (D)-uniform 3-slot FAR patchable jump (2026-07-25) ----
+//
+// THE DEFECT THIS CLOSES. VaranComputeJump2's two MOZ_RELEASE_ASSERTs above are a RELEASE crash on a
+// NORMAL user path: a branch reaches at most +-16MB, and Run D measured 14.50MB of committed JIT code
+// spanning 18.88MB on the device -- so a routine IonCache retarget across the span aborts the browser.
+// Upstream A32 has no such cliff because its far arm demotes the branch to a pool load; that pool path
+// is device-lethal here (A32) and re-entering the pool machinery was the liability that stopped
+// candidate (E). This form reaches ANY 32-bit address with no pool entry at all.
+//
+// THE FOUR SHAPES of a patchable site, all 12 bytes:
+//   near-Always   slot0 = B.W(target)      slot1 = NOP.W               slot2 = NOP.W
+//   near-cond     slot0 = B<c>.W(target)   slot1 = NOP.W               slot2 = NOP.W
+//   mid-cond      slot0 = B<!c>.W(+4)      slot1 = B.W(target)         slot2 = NOP.W
+//   far-Always    slot0 = ldr.w pc,[pc,#4] slot1 = NOP.W               slot2 = target|1
+//   far-cond      slot0 = B<!c>.W(+8)      slot1 = ldr.w pc,[pc,#0]    slot2 = target|1
+// The first three are written by the UNCHANGED VaranComputeJump2 (slot2 = NOP.W is written by
+// PatchJump); the last two are written here.
+//
+// ★ WHY THIS IS A SEPARATE FUNCTION AND NOT A THIRD ARM OF VaranComputeJump2. VaranComputeJump2 is
+// SHARED with the Label chains (varanPatchCondBranch2 <- varanAsBCond/bind), which are 2-slot sites
+// -- Family B. Writing a third word from inside it would corrupt the instruction after every Family-B
+// site. That is exactly how an earlier candidate died. This function is called from jit::PatchJump and
+// nowhere else, and PatchJump only ever sees Family-A sites (reserved 3 slots by jumpWithPatch), so
+// slot2 is only ever written where slot2 was reserved.
+//
+// POSITION-INDEPENDENT: both shapes use fixed immediates (the skip is +8, the loads are +4/+0 from
+// Align(PC,4)), so unlike VaranComputeJump2 this needs no s0 -- there is no distance to encode. The
+// distance lives entirely in the slot2 literal, which is why the range is unbounded.
+static void
+VaranWriteFarJump3(intptr_t target, uint32_t condField, uint32_t* w0, uint32_t* w1, uint32_t* w2)
+{
+    // BXWritePC takes the instruction set from bit0: a literal without the Thumb bit switches the
+    // core to ARM state and the next fetch executes our Thumb words as A32 -- device-lethal, and the
+    // single most-repeated bug class in this port. Assert the input is a RAW code address so that an
+    // already-tagged pointer cannot silently double-tag or mask; then set the bit here, once.
+    MOZ_RELEASE_ASSERT((target & 1) == 0, "VARAN: far jump target already carries the Thumb bit");
+    uint32_t lit = uint32_t(target) | 1u;
+    if (condField >= 14) {
+        *w0 = VARAN_LDRPCPC4_WORD;     // ldr.w pc,[pc,#4]  -> Align(s0+4,4)+4 = slot2
+        *w1 = VARAN_NOPW_WORD;
+    } else {
+        // Branch OVER the whole site when !c, exactly as the mid-cond form does -- only the skip is
+        // +8 instead of +4, because there are now two words to step over (slot1's load and slot2's
+        // literal). EncodeBccT2's offset is relative to PC = slot0+4, so 8 lands at slot0+12.
+        uint32_t inv = uint32_t(Assembler::InvertCondition(Assembler::Condition(condField << 28))) >> 28;
+        *w0 = EncodeBccT2(8, inv);
+        *w1 = VARAN_LDRPCPC0_WORD;     // ldr.w pc,[pc,#0]  -> Align(s0+8,4)+0 = slot2
+    }
+    *w2 = lit;
+}
+
+// Can VaranComputeJump2 encode this jump WITHOUT tripping either of its release asserts? Mirrors its
+// two arms exactly -- Always uses the slot0 B.W (+-16MB), conditional uses either the slot0 B<c>.W
+// (+-1MB) or the slot1 B.W measured from s0+8. Asked BEFORE the call, because the assert IS the crash.
+//
+// ⚠️ The int32 round-trip guard is UNEXERCISED on both of this project's targets, and is labelled as
+// such rather than left looking load-bearing: device ARM32 and the i686 simulator host BOTH have a
+// 4-byte intptr_t, so the round-trip always holds and that branch is never taken here. It exists so a
+// 64-bit host (a future arm64 port, or a 64-bit sim) cannot wrap a >4GB distance into a small one and
+// take the NEAR arm -- a silent wrong branch instead of a loud one.
+static bool
+VaranJump2CanEncode(intptr_t s0, intptr_t target, uint32_t condField)
+{
+    intptr_t d4 = target - (s0 + 4);
+    intptr_t d8 = target - (s0 + 8);
+    if (intptr_t(int32_t(d4)) != d4 || intptr_t(int32_t(d8)) != d8)
+        return false;
+    if (condField >= 14)
+        return VaranBwInRange(int32_t(d4));
+    return VaranBccInRange(int32_t(d4)) || VaranBwInRange(int32_t(d8));
+}
+
 // ★2 FIX (2026-07-25) -- recover the LOGICAL condition of a 2-slot patchable site.
 //
 // THE DEFECT. VaranComputeJump2 has two conditional forms and they disagree about what slot0's
@@ -4131,7 +4244,23 @@ VaranLogicalCondOfPatchSite(const uint32_t* w0, const uint32_t* w1)
         return cf;                                    // near form: stored field IS the logical one
     uint32_t c1 = 14u;
     if (VaranBranchKind(*w1) == 1 && VaranDecodeBranchCond(*w1, &c1) && c1 >= 14) {
-        // far form: slot0 holds !c and slot1 is the unconditional B.W to the real target.
+        // mid form (1MB < |off| <= 16MB): slot0 holds !c and slot1 is the unconditional B.W.
+        return uint32_t(Assembler::InvertCondition(Assembler::Condition(cf << 28))) >> 28;
+    }
+    if (*w1 == VARAN_LDRPCPC0_WORD) {
+        // (D)-uniform far-conditional (>+-16MB): slot0 holds !c and slot1 is the `ldr.w pc,[pc,#0]`
+        // that loads the slot2 literal. Same inversion as the mid form -- the branch-over still has
+        // to test !c -- so the recovery is the same. An EXACT word compare, like the NOP.W arm above,
+        // not a classification: VaranWriteFarJump3 is the only writer of this word.
+        //
+        // Disjoint from the arm above by construction, so the order of the two cannot matter:
+        // VaranBranchKind(0xF000F8DF) is 0, because hw0 = 0xF8DF fails DecodeBranchT2's
+        // `(hw0 & 0xF800) == 0xF000` prefix test (:2253).
+        //
+        // ★ THE far-ALWAYS SHAPE NEEDS NO ARM HERE, and that is load-bearing rather than an omission:
+        // its slot0 is the `ldr.w pc,[pc,#4]` itself, which VaranDecodeBranchCond rejects, so the
+        // `cf >= 14` early return at the top already claims it -- and that early return deliberately
+        // does NOT read slot1, which is what keeps W1 (synthesized 1-slot wasm sites) intact.
         return uint32_t(Assembler::InvertCondition(Assembler::Condition(cf << 28))) >> 28;
     }
     // ASCII only in the literal: this string lands in the binary and is read off a device.
@@ -4190,6 +4319,84 @@ Assembler::varanJumpPatch2SelfTest()
             landing = 8 + d1.off;               // slot1 pc = 4 + 4
         }
         chk(landing == c.d);                    // lands exactly at the requested distance
+    }
+    return fails;
+}
+
+// (D)-uniform self-test -- the 3-slot FAR form and, more importantly, the ★2 READER over ALL FOUR
+// shapes a patchable site can hold. That second half is the point: the far form is only safe if
+// VaranLogicalCondOfPatchSite recovers the same logical condition from every shape, because a site is
+// re-patched and each patch re-reads what the last one wrote. Returns failed-check count.
+//
+// Release-sound by construction: plain returned counts, no MOZ_ASSERT (MOZ_DEBUG is empty on device).
+/* static */ int
+Assembler::varanFarJump3SelfTest()
+{
+    int fails = 0;
+    auto chk = [&](bool ok) { if (!ok) fails++; };
+
+    // (A) the two far shapes: exact words, and the literal carries the Thumb bit.
+    {
+        uint32_t w0 = 0, w1 = 0, w2 = 0;
+        const intptr_t T = intptr_t(0x30000000);     // even, as a real code address always is
+        VaranWriteFarJump3(T, 14, &w0, &w1, &w2);                 // far-Always
+        chk(w0 == VARAN_LDRPCPC4_WORD);
+        chk(w1 == VARAN_NOPW_WORD);
+        chk(w2 == uint32_t(T) + 1u);                              // Thumb bit set, address intact
+
+        for (uint32_t cf = 0; cf < 14; cf++) {                    // far-conditional, every condition
+            VaranWriteFarJump3(T, cf, &w0, &w1, &w2);
+            VaranBranchDec d0 = DecodeBranchT2(w0);
+            uint32_t inv = uint32_t(InvertCondition(Condition(cf << 28))) >> 28;
+            chk(d0.valid && d0.isCond && d0.cond == inv);         // slot0 tests !c ...
+            chk(d0.off == 8);                                     // ... and skips the whole 12B site
+            chk(w1 == VARAN_LDRPCPC0_WORD);
+            chk(w2 == uint32_t(T) + 1u);
+        }
+    }
+
+    // (B) THE FOURTH-ARM TEST: the ★2 reader over all four shapes, for every condition. A site is
+    // patched more than once, so "what does the reader recover from what the writer wrote" is the
+    // invariant that ★2 was about; the far form adds a shape and must not break it.
+    {
+        uint32_t w0 = 0, w1 = 0, w2 = 0;
+        // Always sites: every shape must read back as Always (14), and NONE of them may depend on
+        // slot1 -- W1 relies on the unconditional early return not touching it.
+        VaranComputeJump2(0, 100, 14, &w0, &w1);
+        chk(VaranLogicalCondOfPatchSite(&w0, &w1) == 14u);            // near-Always
+        VaranWriteFarJump3(intptr_t(0x30000000), 14, &w0, &w1, &w2);
+        chk(VaranLogicalCondOfPatchSite(&w0, &w1) == 14u);            // far-Always
+        {   // and it must still say Always with GARBAGE in slot1 -- i.e. it really did not read it
+            uint32_t junk = 0xDEADBEEFu;
+            chk(VaranLogicalCondOfPatchSite(&w0, &junk) == 14u);
+        }
+        for (uint32_t cf = 0; cf < 14; cf++) {
+            VaranComputeJump2(0, 100, cf, &w0, &w1);                  // near-cond  (<= +-1MB)
+            chk(VaranLogicalCondOfPatchSite(&w0, &w1) == cf);
+            VaranComputeJump2(0, 4000000, cf, &w0, &w1);              // mid-cond   (invert + B.W)
+            chk(VaranLogicalCondOfPatchSite(&w0, &w1) == cf);
+            VaranWriteFarJump3(intptr_t(0x30000000), cf, &w0, &w1, &w2);   // far-cond (3-slot)
+            chk(VaranLogicalCondOfPatchSite(&w0, &w1) == cf);
+        }
+    }
+
+    // (C) the range predicate agrees with VaranComputeJump2's two release asserts at the boundaries.
+    // Distances are measured from s0; the Always/slot0 arm subtracts 4 and the slot1 B.W arm 8, so
+    // the exact edges are those constants offset by the bias -- checked, not eyeballed.
+    {
+        const intptr_t s0 = 0;
+        chk( VaranJump2CanEncode(s0,  16777214 + 4, 14));   // Always: largest encodable forward
+        chk(!VaranJump2CanEncode(s0,  16777216 + 4, 14));   // one step past -> far
+        chk( VaranJump2CanEncode(s0, -16777216 + 4, 14));   // largest encodable backward
+        chk(!VaranJump2CanEncode(s0, -16777218 + 4, 14));
+        chk( VaranJump2CanEncode(s0,   1048574 + 4,  0));   // cond: still the direct B<c>.W
+        chk( VaranJump2CanEncode(s0,  16777214 + 8,  0));   // cond: via the slot1 B.W (bias 8)
+        chk(!VaranJump2CanEncode(s0,  16777216 + 8,  0));   // one step past -> far
+        // A distance that does not fit int32 must go FAR, not wrap into the near arm. ⚠️ SKIPPED on
+        // every machine this project runs -- device ARM32 and the i686 sim host both have a 4-byte
+        // intptr_t. Recorded as a known-unexercised check rather than counted as coverage.
+        if (sizeof(intptr_t) > 4)
+            chk(!VaranJump2CanEncode(s0, intptr_t(1) << 34, 14));
     }
     return fails;
 }
