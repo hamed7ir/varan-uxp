@@ -1636,7 +1636,42 @@ Interpret(JSContext* cx, RunState& state)
  * IBM's C compiler when run with the right options (e.g., -qlanglvl=extended)
  * also supports threading. Ditto the SunPro C compiler.
  */
-#if (defined(__GNUC__) ||                                                         \
+// ★ VARAN 2026-07-28: `|| defined(__clang__)` added. clang-cl in MSVC-compatibility mode
+// does NOT define __GNUC__ (verified: it defines __clang__, _MSC_VER, __arm__, __thumb2__,
+// __ARM_NEON__ -- __GNUC__ is the ONLY missing token), so this whole build was taking the
+// portable switch below. That is not a theoretical loss: page-load scripts run ONCE, so they
+// never reach the Baseline (10) or Ion (1000) warm-up thresholds and execute HERE, in the
+// phase that owns 63-87% of page load. Devbox measurement: ~84% of that phase is JS.
+//
+// ARTIFACT PROOF it was really off, before the change: `llvm-nm Unified_cpp_js_src34.obj |
+// grep -i addresses` returned ZERO hits (other function-local statics ARE listed, so the
+// absence was decisive), and the built Interpret() dispatched through a single
+// `tbh [pc, r0, lsl #1]` with a cmp/bhi bounds check -- 240 opcodes through ONE indirect
+// branch, i.e. one BTB history slot for the entire interpreter.
+//
+// Widening to __clang__ and NOT to _M_ARM on purpose: this is a compiler-capability test,
+// not an ARM workaround. MSVC proper still gets the switch. Verified safe: clang-cl accepts
+// `&&label` / `goto *` at this build's exact flags (exit 0, no diagnostics); the
+// -Wgnu-label-as-value warning fires only under -Wpedantic/-Wall, which this build does not
+// pass, and there is no warnings-as-errors setting.
+//
+// ⚠️ TWO THINGS THIS TOUCHES ELSEWHERE, both handled deliberately:
+//  1. varan-imp-fix.py sees the new 256-entry label table in .rdata as 256 even pointers
+//     into our own .text -- the exact shape of the __imp_ bug it exists to catch. It must
+//     EXCLUDE the table (by symbol/structure), never record an expected count of 256.
+//  2. clang lowers `goto *` here to `mov pc, Rm` with EVEN table entries. Per the ARM ARM
+//     that is BranchWritePC (masks bit0, stays in Thumb), unlike `bx` -- but that is
+//     INFERENCE, not device-verified, and this project has been bitten twice by even code
+//     pointers. The device trip must smoke-test the INTERPRETER PATH, not just "it booted".
+//
+// ★ VARAN_FORCE_SWITCH_DISPATCH: build-time escape hatch, added with the widening above.
+// Defining it (-DVARAN_FORCE_SWITCH_DISPATCH) forces the portable switch on ANY compiler.
+// TWO jobs: (i) it builds the switch-dispatch arms of the js.exe A/B/C measurement WITHOUT
+// reverting the source, so the three shells differ by flags alone and git state stays clean;
+// (ii) if threading ever regresses on device (I-cache pressure on a 32 KB L1 is a real risk
+// on Cortex-A9), the fallback is one define, not a source revert.
+#if !defined(VARAN_FORCE_SWITCH_DISPATCH) &&                                  \
+    (defined(__GNUC__) || defined(__clang__) ||                               \
      (__IBMC__ >= 700 && defined __IBM_COMPUTED_GOTO) ||                      \
      __SUNPRO_C >= 0x570)
 // Non-standard but faster indirect-goto-based dispatch.
