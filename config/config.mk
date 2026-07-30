@@ -390,12 +390,39 @@ ifeq ($(CPU_ARCH),x86_64)
 # non-main threads, but that should be tolerable on 64-bit systems.
 WIN32_EXE_LDFLAGS      += -STACK:8388608
 else
+ifeq ($(CPU_ARCH),arm)
+# Varan 2026-07-30. The x86_64 branch above takes 8 MB explicitly "to deal with frame
+# construction for unreasonably deep DOM trees with worst-case styling". That is exactly
+# what a modern Polymer/custom-element UI is, and we were taking the 1.5 MB 32-bit value.
+#
+# WHY WE THINK IT MATTERS HERE: the JS recursion ceiling is
+#   kStackQuota = min(GetWindowsStackSize(), javascript.options.main_thread_stack_quota_cap)
+# (XPCJSContext.cpp:3288/3320), so the 1.5 MB PE reserve IS the ceiling -- the 2 MB pref cap
+# never binds. On VENICE the device console shows "too much recursion" at
+# kevlar_base_module, and two separate symptoms both appear only once YouTube's UI finishes
+# initialising: the video stops, and the player settings menu stops opening (it works if
+# clicked BEFORE init completes). Deep component-tree construction blowing a small native
+# stack fits that shape.
+#
+# !! THIS IS A JUDGEMENT CALL, NOT A PROVEN FIX. It is included because it is one line in a
+# build we are doing anyway, and it is trivially revertible. If the device shows no change,
+# revert it rather than leaving the address-space cost in place.
+#
+# 4 MB, NOT 8: the upstream comment's warning is real and applies to us more than to x64 --
+# -STACK sets the RESERVE for every thread, and this is a 32-bit process with ~2 GB of
+# address space. 4 MB x ~40 threads is ~160 MB of reserve (address space, not committed
+# memory), which is tolerable; 8 MB would not be.
+# Pair with javascript.options.main_thread_stack_quota_cap, or the min() above clamps us
+# straight back to 2 MB.
+WIN32_EXE_LDFLAGS      += -STACK:4194304
+else
 # Since this setting affects the default stack size for non-main
 # threads, too, to avoid burning the address space, increase only
 # 512 KB over the default. Just enough to be able to deal with
 # reasonable styling applied to DOM trees whose depth is near what
 # Blink's HTML parser can output.
 WIN32_EXE_LDFLAGS      += -STACK:1572864
+endif
 endif
 endif
 

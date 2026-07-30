@@ -585,7 +585,11 @@ if CONFIG['INTEL_ARCHITECTURE']:
     SOURCES['skia/src/opts/SkOpts_sse41.cpp'].flags += skia_opt_flags
     SOURCES['skia/src/opts/SkOpts_sse42.cpp'].flags += skia_opt_flags
     SOURCES['skia/src/opts/SkOpts_ssse3.cpp'].flags += skia_opt_flags
-elif CONFIG['CPU_ARCH'] in ('arm', 'aarch64') and CONFIG['GNU_CC']:
+# Varan 2026-07-30: was `and CONFIG['GNU_CC']`, which is '' under clang-cl, so NONE of the
+# ARM opts compiled and the core dispatch's *_neon references were resolved by undefining
+# __ARM_NEON__ further down (forcing scalar). Device-confirmed that Skia beats cairo/pixman
+# even scalar; this compiles the real NEON impls so the undef can go.
+elif CONFIG['CPU_ARCH'] in ('arm', 'aarch64'):
     UNIFIED_SOURCES += [
         'skia/src/core/SkUtilsArm.cpp',
     ]
@@ -605,7 +609,12 @@ elif CONFIG['CPU_ARCH'] in ('arm', 'aarch64') and CONFIG['GNU_CC']:
             'skia/src/opts/SkBlitRow_opts_arm_neon.cpp',
             'skia/src/opts/SkOpts_neon.cpp',
         ]
-    elif CONFIG['BUILD_ARM_NEON']:
+    # Varan: BUILD_ARM_NEON is EMPTY here -- build/autoconf/arch.m4's probe uses a GAS
+    # directive (`asm(".fpu neon")`) that clang-cl rejects, so the flag never gets set and
+    # this branch never fired. thumbv7-unknown-windows-msvc has NEON unconditionally
+    # (Windows-on-ARM guarantees it), so gate on the arch instead. NEON_FLAGS is empty for
+    # us and adds nothing -- M4.2 established that clang-cl needs no -mfpu for NEON.
+    elif CONFIG['BUILD_ARM_NEON'] or CONFIG['CPU_ARCH'] == 'arm':
         SOURCES += [
             'skia/src/opts/SkBitmapProcState_arm_neon.cpp',
             'skia/src/opts/SkBitmapProcState_matrixProcs_neon.cpp',
@@ -618,7 +627,7 @@ elif CONFIG['CPU_ARCH'] in ('arm', 'aarch64') and CONFIG['GNU_CC']:
         SOURCES['skia/src/opts/SkBlitMask_opts_arm_neon.cpp'].flags += CONFIG['NEON_FLAGS']
         SOURCES['skia/src/opts/SkBlitRow_opts_arm_neon.cpp'].flags += CONFIG['NEON_FLAGS']
         SOURCES['skia/src/opts/SkOpts_neon.cpp'].flags += CONFIG['NEON_FLAGS']
-    if CONFIG['CPU_ARCH'] == 'aarch64' or CONFIG['BUILD_ARM_NEON']:
+    if CONFIG['CPU_ARCH'] == 'aarch64' or CONFIG['BUILD_ARM_NEON'] or CONFIG['CPU_ARCH'] == 'arm':
         SOURCES['skia/src/opts/SkBitmapProcState_arm_neon.cpp'].flags += skia_opt_flags
         SOURCES['skia/src/opts/SkBitmapProcState_matrixProcs_neon.cpp'].flags += skia_opt_flags
         SOURCES['skia/src/opts/SkBlitMask_opts_arm_neon.cpp'].flags += skia_opt_flags
@@ -719,7 +728,13 @@ elif CONFIG['CPU_ARCH'] == 'arm' and CONFIG['GNU_CC'] and CONFIG['BUILD_ARM_NEON
 # built -> link undefined. Undefine the NEON detection macros so skia's header agrees with the
 # build's no-NEON-opts choice (scalar dispatch). Same systemic cause as the libwebp dsp.h guard.
 # Perf debt owed to M3 (NEON via Thumb-2-safe intrinsics is a later lever, not an M2 blocker).
-if CONFIG['CPU_ARCH'] == 'arm' and not CONFIG['GNU_CC']:
+# Varan 2026-07-30: the undef is GONE. It existed only because the *_neon impls were not
+# compiled, so SkPreConfig.h's SK_ARM_HAS_NEON (derived from clang-cl's __ARM_NEON__) made the
+# core dispatch reference symbols that did not exist -> link undefined. The ARM branch above now
+# builds those impls, so the header and the build agree WITH NEON ON, which is the point.
+# !! IF THE LINK REPORTS UNDEFINED *_neon SYMBOLS, the source list above is incomplete -- fix
+# the list, do NOT restore the undef. Restoring it silently reverts this whole change to scalar.
+if False:
     CFLAGS += ['-U__ARM_NEON__', '-U__ARM_NEON']
     CXXFLAGS += ['-U__ARM_NEON__', '-U__ARM_NEON']
 
