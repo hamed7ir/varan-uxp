@@ -240,6 +240,13 @@ DeallocateProcessExecutableMemory(void* addr, size_t bytes)
 //   GOANNA_FORCE_RWX=1 : commit/keep JIT pages PAGE_EXECUTE_READWRITE (known-working RWX
 //                        mapping on this device); the W^X flips then leave pages RWX. Tests suspect S2.
 //   GOANNA_JITDBG=1    : breadcrumb every commit/reprotect to stderr (address, size, flags, WIN32 result).
+//
+// !! VARAN 2026-07-30 -- DEBUG-ONLY NOW. These were M1.1 bring-up toggles and they shipped in
+// the RELEASE browser, where GOANNA_FORCE_RWX=1 in the environment would leave every JIT page
+// PAGE_EXECUTE_READWRITE. That hands any process able to set an env var a W^X bypass in the
+// JIT allocator -- a security property silently defeatable from outside the browser. The
+// bring-up value is real, so they are kept for DEBUG builds and compiled out of release.
+#ifdef DEBUG
 static bool GoannaForceRWX() {
     static int v = -1;
     if (v < 0) { const char* e = getenv("GOANNA_FORCE_RWX"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
@@ -250,6 +257,11 @@ static bool GoannaJitDbg() {
     if (v < 0) { const char* e = getenv("GOANNA_JITDBG"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
     return v == 1;
 }
+#else
+// Release: W^X is not negotiable at runtime, and no stderr breadcrumbs.
+static bool GoannaForceRWX() { return false; }
+static bool GoannaJitDbg()   { return false; }
+#endif
 
 static DWORD
 ProtectionSettingToFlags(ProtectionSetting protection)
