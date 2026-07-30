@@ -319,6 +319,28 @@ PodSet(T* aDst, const T& aSrc, size_t aNElem)
  */
 #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_NONE)
 # define JS_SWEPT_CODE_PATTERN 0xED // IN instruction, crashes in user mode.
+#elif defined(JS_CODEGEN_ARM) && defined(MOZ_THUMB2)
+// Varan: upstream's 0xA3 is NOT an undefined instruction in the dialect we execute, so the
+// guarantee this macro exists to provide -- swept jitcode traps on its first halfword -- does
+// not hold on this port. VERIFIED by assembling for thumbv7-unknown-windows-msvc:
+//     .short 0xa3a3  ->  adr r3, #652     valid, non-faulting: execution SLIDES
+//     .short 0xdede  ->  udf #0xde        permanently UNDEFINED (16-bit T1)
+// Executing a swept range therefore used to run size/2 harmless `adr r3` and fall through into
+// whatever followed, converting a jitcode use-after-free into silent corruption instead of a
+// trap. 0xDE gives a UDF at every halfword-aligned entry point, which is the intended behaviour.
+//
+// (Upstream's comment is wrong for A32 too, not just for Thumb-2: A32 0xA3A3A3A3 decodes as
+// movge r3,#0x3A3 with a should-be-zero field set, i.e. UNPREDICTABLE rather than UNDEFINED, and
+// on silicon it most likely also slides. This is not a Thumb-2 regression -- it is a latent
+// upstream defect that only bites once the ARM JIT is actually on, which is now.)
+//
+// jsutil.h:302 asks for an odd byte so that IsThingPoisoned's `(*p & 1) == 0` fast path can
+// reject the common case in one test, and 0xDE is even. That is accepted deliberately: the only
+// UDF encoding available as a uniform byte fill needs the high byte 0xDE, IsThingPoisoned is
+// DEBUG-only (gc/Marking.cpp:121), and JS_SWEPT_CODE_PATTERN can never appear in a GC thing --
+// poisonCode memsets executable-pool ranges, not the GC heap. So the entry in that array was
+// already inert for its stated purpose.
+# define JS_SWEPT_CODE_PATTERN 0xDE // UDF #0xDE -- permanently undefined in Thumb-2.
 #elif defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_ARM64)
 # define JS_SWEPT_CODE_PATTERN 0xA3 // undefined instruction
 #elif defined(JS_CODEGEN_MIPS32) || defined(JS_CODEGEN_MIPS64) || defined(JS_CODEGEN_LOONGARCH64)

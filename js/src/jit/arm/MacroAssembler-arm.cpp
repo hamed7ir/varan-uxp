@@ -3429,6 +3429,18 @@ MacroAssemblerARMCompat::storeValue(ValueOperand val, const BaseIndex& dest)
     ScratchRegisterScope scratch(asMasm());
 
     if (isValueDTRDCandidate(val) && Abs(dest.offset) <= 255) {
+#if defined(VARAN_THUMB2)
+        // Varan: always take the immediate-offset arm. T32 has no register-offset STRD, so
+        // EDtrOffReg is synthesised (Assembler-arm.cpp as_extdtr, size==64) as
+        // `add.w ip,base,rm` + `strd [ip,#0]`; preceded by the ma_lsl the offset==0 scaled case
+        // needs, that is THREE instructions. ma_alu folds base + (index << scale) into a single
+        // shifted-register add.w, so this arm is TWO for every scale -- including TimesOne, where
+        // it emits exactly the same add+strd pair the synth would have. This is the dense JS
+        // array element store path (CodeGenerator.cpp storeElementTyped, BaselineIC.cpp), which
+        // is why it is worth the four bytes and the instruction.
+        ma_alu(dest.base, lsl(dest.index, dest.scale), scratch, OpAdd);
+        ma_strd(val.payloadReg(), val.typeReg(), EDtrAddr(scratch, EDtrOffImm(dest.offset)));
+#else
         Register tmpIdx;
         if (dest.offset == 0) {
             if (dest.scale == TimesOne) {
@@ -3443,6 +3455,7 @@ MacroAssemblerARMCompat::storeValue(ValueOperand val, const BaseIndex& dest)
             ma_strd(val.payloadReg(), val.typeReg(),
                     EDtrAddr(scratch, EDtrOffImm(dest.offset)));
         }
+#endif
     } else {
         ma_alu(dest.base, lsl(dest.index, dest.scale), scratch, OpAdd);
         storeValue(val, Address(scratch, dest.offset));
@@ -3455,6 +3468,15 @@ MacroAssemblerARMCompat::loadValue(const BaseIndex& addr, ValueOperand val)
     ScratchRegisterScope scratch(asMasm());
 
     if (isValueDTRDCandidate(val) && Abs(addr.offset) <= 255) {
+#if defined(VARAN_THUMB2)
+        // Varan: always take the immediate-offset arm -- see the matching comment in
+        // storeValue(ValueOperand, const BaseIndex&) above. Two instructions instead of three
+        // for every scale. It also dissolves the val.aliases(addr.index) hazard the register-
+        // offset arm has to work around: the index is consumed by the add before the LDRD
+        // writes either destination register, so there is nothing left to alias.
+        ma_alu(addr.base, lsl(addr.index, addr.scale), scratch, OpAdd);
+        ma_ldrd(EDtrAddr(scratch, EDtrOffImm(addr.offset)), val.payloadReg(), val.typeReg());
+#else
         Register tmpIdx;
         if (addr.offset == 0) {
             if (addr.scale == TimesOne) {
@@ -3477,6 +3499,7 @@ MacroAssemblerARMCompat::loadValue(const BaseIndex& addr, ValueOperand val)
             ma_ldrd(EDtrAddr(scratch, EDtrOffImm(addr.offset)),
                     val.payloadReg(), val.typeReg());
         }
+#endif
     } else {
         ma_alu(addr.base, lsl(addr.index, addr.scale), scratch, OpAdd);
         loadValue(Address(scratch, addr.offset), val);

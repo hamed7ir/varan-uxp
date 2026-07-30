@@ -857,6 +857,36 @@ JitCode::togglePreBarriers(bool enabled, ReprotectCode reprotect)
     if (!reader.more())
         return;
 
+    // Varan: merge the per-site instruction-cache flushes into ONE for the whole code object.
+    //
+    // Assembler::ToggleToCmp/ToggleToJmp each end in AutoFlushICache::flush(ptr, 4). With no
+    // enclosing AutoFlushICache that takes the !afc branch (see AutoFlushICache::flush below),
+    // so EVERY pre-barrier site in EVERY script of the zone becomes its own
+    // __dmb + FlushInstructionCache + __isb -- three barriers and a syscall to publish four
+    // bytes, on a device where syscalls are expensive. Declaring the context and setting the
+    // range to this code object makes those N flushes defer and collapse into one flush of the
+    // whole buffer in ~AutoFlushICache.
+    //
+    // ONLY on the Reprotect path, and that is not a heuristic -- it is exactly the caller split:
+    //   Reprotect     jit::ToggleBarriers -> {Ion,Baseline}Script::toggleBarriers (the default)
+    //                 and JitCompartment::toggleBarriers. The GC toggle. No enclosing context.
+    //   DontReprotect stub/code attach: SharedIC.cpp:732, BaselineCacheIR.cpp:488,
+    //                 CodeGenerator.cpp:1727/1884/2032 -- every one of them already runs inside
+    //                 a Linker's AutoFlushICache covering this same buffer. Nesting a second
+    //                 context there would be correct but would flush the range TWICE, so it is
+    //                 left alone.
+    //
+    // Safe by the contract documented at AutoFlushICache's definition: code patched inside the
+    // context must not execute before the context exits. That holds here -- ToggleBarriers runs
+    // off Zone::setNeedsIncrementalBarrier on the main thread with no JS on the stack. Declared
+    // before the MaybeAutoWritableJitCode below so that it is destroyed AFTER it: the flush must
+    // land once the pages are executable again, not while they are writable.
+    mozilla::Maybe<AutoFlushICache> afc;
+    if (reprotect == Reprotect) {
+        afc.emplace("togglePreBarriers");
+        AutoFlushICache::setRange(uintptr_t(code_), bufferSize_);
+    }
+
     MaybeAutoWritableJitCode awjc(this, reprotect);
     do {
         size_t offset = reader.readUnsigned();

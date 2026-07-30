@@ -368,6 +368,21 @@ ExecutableAllocator::poisonCode(JSRuntime* rt, JitPoisonRangeVector& ranges)
         ExecutablePool* pool = ranges[i].pool;
         if (pool->isMarked()) {
             reprotectPool(rt, pool, ProtectionSetting::Executable);
+#if defined(JS_CODEGEN_ARM) && defined(XP_WIN)
+            // Varan: the poison above is a plain memset, and reprotectPool is VirtualProtect only
+            // (ProcessExecutableMemory.cpp ReprotectRegion) -- neither performs instruction-cache
+            // maintenance. This device's I-cache is DEVICE-PROVEN non-coherent (see the cacheFlush
+            // comment in ExecutableAllocator.h), so without this the I-cache can still hold the
+            // ORIGINAL, valid jitcode for a range we have just declared dead: stale execution then
+            // runs real code instead of trapping, which is exactly the failure the poison exists to
+            // prevent. Under JS_CODEGEN_NONE this path never ran because no jitcode was ever
+            // allocated or swept; it became live when the JIT was turned on.
+            //
+            // Flushed once per pool over the pool's written extent -- the same range reprotectPool
+            // just covered -- rather than once per range, and after the pages are executable again.
+            cacheFlush(pool->m_allocation.pages,
+                       size_t(pool->m_freePtr - pool->m_allocation.pages));
+#endif
             pool->unmark();
         }
         pool->release();

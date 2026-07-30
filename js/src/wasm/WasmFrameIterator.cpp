@@ -286,7 +286,16 @@ GenerateProfilingPrologue(MacroAssembler& masm, unsigned framePushed, ExitReason
     // this requires AutoForbidPools to prevent a constant pool from being
     // randomly inserted between two instructions.
     {
-#if defined(JS_CODEGEN_ARM)
+#if defined(VARAN_THUMB2)
+        // Varan (W6): the nesting-safe form. Our conditional-forms conversion made several
+        // ordinary emitters open their OWN no-pool region, so a plain AutoForbidPools here
+        // re-enters enterNoPool and trips MOZ_ASSERT(!canNotPlacePool_)
+        // (IonAssemblerBufferWithConstantPools.h). The Ion callers were converted when the
+        // nesting-safe class was introduced; these two wasm sites were left behind, and they
+        // are the 5 wasm hits named in that class's comment (jit/arm/Assembler-arm.h).
+        // Skipping the inner region is correct, not a suppression -- see the same comment.
+        VaranForbidPoolsIfOutermost afp(&masm, /* number of instructions in scope = */ 7);
+#elif defined(JS_CODEGEN_ARM)
         AutoForbidPools afp(&masm, /* number of instructions in scope = */ 7);
 #endif
 
@@ -335,7 +344,10 @@ GenerateProfilingEpilogue(MacroAssembler& masm, unsigned framePushed, ExitReason
     // instructions from profilingReturn, so AutoForbidPools to ensure that
     // unintended instructions are not automatically inserted.
     {
-#if defined(JS_CODEGEN_ARM)
+#if defined(VARAN_THUMB2)
+        // Varan (W6): nesting-safe form -- see GenerateProfilingPrologue above.
+        VaranForbidPoolsIfOutermost afp(&masm, /* number of instructions in scope = */ 4);
+#elif defined(JS_CODEGEN_ARM)
         AutoForbidPools afp(&masm, /* number of instructions in scope = */ 4);
 #endif
 
