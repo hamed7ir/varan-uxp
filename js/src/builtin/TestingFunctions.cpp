@@ -5518,18 +5518,28 @@ VaranT2Wasm1Slot(JSContext* cx, unsigned argc, Value* vp)
         check(masm.varanPeekWord(o) != MARKER);
     }
 
-    // ---- case 2: the 2-slot conditional site must STILL be patched as a pair ----
+    // ---- case 2: the multi-slot conditional site must STILL be patched within its reservation ----
     // Non-vacuity in the other direction: a fix that simply stopped writing slot1 for everything
     // would break every jumpWithPatch/backedgeJump site, and this case would catch that.
+    //
+    // ⚠ THE FOLLOWER OFFSET IS DERIVED, NOT HARD-CODED. It used to be written `o + 8`, which was
+    // right when jumpWithPatch reserved two slots and became silently WRONG when (D)-uniform grew
+    // the reservation to three (MacroAssembler-arm.cpp jumpWithPatch: slot0 + two NOP.W = 12 B).
+    // The test then read slot2 of the reservation -- a NOP.W -- instead of the marker, and failed
+    // for a reason that had nothing to do with the property under test. Asking the assembler where
+    // the follower landed cannot rot that way. The footprint itself is checked separately below,
+    // because a changed footprint is load-bearing for every in-place patcher and must fail LOUDLY
+    // rather than quietly relocate what this assertion reads.
     {
         MacroAssembler masm;
         RepatchLabel rl;
         CodeOffsetJump coj = masm.jumpWithPatch(&rl, Assembler::NotEqual);
         int o = coj.offset();
+        int fo = masm.nextOffset().getOffset();               // wherever the reservation ends
         masm.as_movw(r7, Imm16(0xbeef));                      // follower, must ALSO survive
         masm.bind(&rl);
-        // slot0 and slot1 belong to the reservation; the follower is at o+8.
-        check(masm.varanPeekWord(o + 8) == MARKER);
+        check(fo - o == 12);                                  // (D)-uniform: slot0 + slot1 + slot2
+        check(masm.varanPeekWord(fo) == MARKER);
     }
 
     args.rval().setInt32(fails);
