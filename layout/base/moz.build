@@ -161,6 +161,7 @@ UNIFIED_SOURCES += [
     'StackArena.cpp',
     'StaticPresData.cpp',
     'TouchManager.cpp',
+    'VaranPhases.cpp',
     'ZoomConstraintsClient.cpp',
 ]
 

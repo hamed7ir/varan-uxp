@@ -9,6 +9,7 @@
  */
 
 #include "mozilla/RestyleManager.h"
+#include "VaranPhases.h"   // Varan: main-thread phase accounting
 
 #include <algorithm> // For std::max
 #include "mozilla/EffectSet.h"
@@ -777,6 +778,9 @@ RestyleManager::FinishRebuildAllStyleData()
 void
 RestyleManager::ProcessPendingRestyles()
 {
+  // Varan: style resolution has no scriptable hook, so it can only be measured here.
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_STYLE);
+
   NS_PRECONDITION(PresContext()->Document(), "No document?  Pshaw!");
   NS_PRECONDITION(!nsContentUtils::IsSafeToRunScript(),
                   "Missing a script blocker!");

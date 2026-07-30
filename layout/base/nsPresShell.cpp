@@ -18,6 +18,7 @@
 /* a presentation of a document, part 2 */
 
 #include "mozilla/Logging.h"
+#include "VaranPhases.h"   // Varan: main-thread phase accounting
 
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/StyleSheetInlines.h"
@@ -6145,6 +6146,12 @@ PresShell::Paint(nsView*        aViewToPaint,
   PROFILER_LABEL("PresShell", "Paint",
     js::ProfileEntry::Category::GRAPHICS);
 
+  // Varan: paint likewise has no scriptable hook. The dump is driven from here rather
+  // than from a timer because paint runs regularly and costs us no new thread -- and if
+  // paint has stopped running, that is itself the finding.
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_PAINT);
+  mozilla::varan::PhaseMaybeDump();
+
   NS_ASSERTION(!mIsDestroying, "painting a destroyed PresShell");
   NS_ASSERTION(aViewToPaint, "null view");
 
@@ -9005,6 +9012,10 @@ PresShell::ScheduleReflowOffTimer()
 bool
 PresShell::DoReflow(nsIFrame* target, bool aInterruptible)
 {
+  // Varan: reflow IS visible to chrome JS via nsIReflowObserver, but it is timed here as
+  // well so this report stands alone and does not depend on the XPConnect double path.
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_REFLOW);
+
   gfxTextPerfMetrics* tp = mPresContext->GetTextPerfMetrics();
   TimeStamp timeStart;
   if (tp) {
