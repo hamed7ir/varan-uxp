@@ -41,8 +41,20 @@ enum PhaseKind {
   PHASE_STYLE = 0,   // RestyleManager::ProcessPendingRestyles
   PHASE_REFLOW,      // PresShell::DoReflow
   PHASE_PAINT,       // PresShell::Paint
+  PHASE_JS,          // AutoEntryScript -- every entry into JS from Gecko
+  PHASE_GC,          // nsJSContext::GarbageCollectNow / inter-slice GC
+  PHASE_CC,          // nsJSContext::CycleCollectNow / RunCycleCollectorSlice
   PHASE_COUNT
 };
+
+/*
+ * !! THESE PHASES ARE NOT DISJOINT, AND JS MAKES THAT MUCH WORSE THAN IT WAS.
+ * A script that reads offsetHeight forces a synchronous reflow INSIDE the JS scope, and
+ * allocation inside JS can trigger a GC inside the JS scope. So PHASE_JS legitimately
+ * CONTAINS some of reflow, style and GC. Adding all six and subtracting from wall time is
+ * meaningless. Read each one as its own share of blocked time; the containment is stated
+ * in the report so nobody does the arithmetic that does not work.
+ */
 
 // True only if VARAN_PHASES is set in the environment. Read once, on first use.
 bool PhasesEnabled();
@@ -56,40 +68,22 @@ void PhaseAccumulate(PhaseKind aKind, const TimeDuration& aDelta);
 // freeze or a kill still leaves data behind and no shutdown hook is required.
 void PhaseMaybeDump();
 
+// Non-RAII form, for sites whose scope is a class whose layout must not change --
+// AutoEntryScript is constructed inline all over the tree, so adding a member to it would
+// be both an ABI change and a very wide rebuild. Its ctor and dtor happen to be
+// out-of-line, so Enter/Exit can bracket it without touching the class at all.
+// Outermost-only, exactly like AutoPhase, and they share the same depth counters.
+void PhaseEnter(PhaseKind aKind);
+void PhaseExit(PhaseKind aKind);
+
 class MOZ_RAII AutoPhase
 {
 public:
-  explicit AutoPhase(PhaseKind aKind)
-    : mKind(aKind)
-    , mOutermost(false)
-  {
-    if (!PhasesEnabled()) {
-      return;
-    }
-    if (sDepth[aKind] == 0) {
-      mOutermost = true;
-      mStart = TimeStamp::Now();
-    }
-    sDepth[aKind]++;
-  }
-
-  ~AutoPhase()
-  {
-    if (!PhasesEnabled()) {
-      return;
-    }
-    sDepth[mKind]--;
-    if (mOutermost) {
-      PhaseAccumulate(mKind, TimeStamp::Now() - mStart);
-    }
-  }
+  explicit AutoPhase(PhaseKind aKind) : mKind(aKind) { PhaseEnter(aKind); }
+  ~AutoPhase() { PhaseExit(mKind); }
 
 private:
-  static uint32_t sDepth[PHASE_COUNT];
-
   PhaseKind mKind;
-  bool      mOutermost;
-  TimeStamp mStart;
 };
 
 } // namespace varan

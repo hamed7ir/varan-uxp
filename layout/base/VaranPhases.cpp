@@ -11,9 +11,11 @@
 namespace mozilla {
 namespace varan {
 
-uint32_t AutoPhase::sDepth[PHASE_COUNT] = { 0, 0, 0 };
+static uint32_t  gDepth[PHASE_COUNT] = { 0, 0, 0, 0, 0, 0 };
+static TimeStamp gStart[PHASE_COUNT];
 
-static const char* const kPhaseName[PHASE_COUNT] = { "style", "reflow", "paint" };
+static const char* const kPhaseName[PHASE_COUNT] =
+  { "style", "reflow", "paint", "JS", "GC", "CC" };
 
 namespace {
 
@@ -24,7 +26,10 @@ struct PhaseTotals
   uint64_t mCount;
 };
 
-PhaseTotals gTotals[PHASE_COUNT] = { { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 } };
+PhaseTotals gTotals[PHASE_COUNT] = {
+  { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 },
+  { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 }, { 0.0, 0.0, 0 }
+};
 
 TimeStamp gFirst;      // first time anything was recorded -- the denominator
 TimeStamp gLastDump;
@@ -38,6 +43,30 @@ PhasesEnabled()
   // become part of what it is measuring.
   static const bool sEnabled = !!getenv("VARAN_PHASES");
   return sEnabled;
+}
+
+void
+PhaseEnter(PhaseKind aKind)
+{
+  if (!PhasesEnabled() || aKind >= PHASE_COUNT) {
+    return;
+  }
+  if (gDepth[aKind] == 0) {
+    gStart[aKind] = TimeStamp::Now();
+  }
+  gDepth[aKind]++;
+}
+
+void
+PhaseExit(PhaseKind aKind)
+{
+  if (!PhasesEnabled() || aKind >= PHASE_COUNT || gDepth[aKind] == 0) {
+    return;
+  }
+  gDepth[aKind]--;
+  if (gDepth[aKind] == 0 && !gStart[aKind].IsNull()) {
+    PhaseAccumulate(aKind, TimeStamp::Now() - gStart[aKind]);
+  }
 }
 
 void

@@ -4,6 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/dom/ScriptSettings.h"
+#include "VaranPhases.h"   // Varan: main-thread phase accounting
 #include "mozilla/ThreadLocal.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/CycleCollectedJSContext.h"
@@ -669,6 +670,13 @@ AutoEntryScript::AutoEntryScript(nsIGlobalObject* aGlobalObject,
 {
   MOZ_ASSERT(aGlobalObject);
 
+  // Varan: every entry into JS from Gecko passes through here, which makes this the one
+  // choke point that measures ALL content script execution -- script tags, event handlers,
+  // timers, promise jobs. Enter/Exit rather than an RAII member because AutoEntryScript is
+  // constructed inline across the tree and adding a member would change its layout.
+  // The (JSObject*) constructor DELEGATES to this one, so this is not double counted.
+  mozilla::varan::PhaseEnter(mozilla::varan::PHASE_JS);
+
   if (aIsMainThread && gRunToCompletionListeners > 0) {
     mDocShellEntryMonitor.emplace(cx(), aReason);
   }
@@ -687,6 +695,12 @@ AutoEntryScript::~AutoEntryScript()
   // us out on certain (flawed) benchmarks like sunspider, because it lets us
   // avoid GCing during the timing loop.
   JS_MaybeGC(cx());
+
+  // Varan: closed AFTER JS_MaybeGC deliberately. That call can run a whole garbage
+  // collection, and it is caused by having just run script -- so it belongs inside the JS
+  // interval, not outside it. It will also be counted under GC; the two overlap on
+  // purpose, which is why the report says not to add the phases together.
+  mozilla::varan::PhaseExit(mozilla::varan::PHASE_JS);
 }
 
 AutoEntryScript::DocshellEntryMonitor::DocshellEntryMonitor(JSContext* aCx,

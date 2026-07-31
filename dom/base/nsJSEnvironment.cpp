@@ -5,6 +5,7 @@
 
 #include "nsError.h"
 #include "nsJSEnvironment.h"
+#include "VaranPhases.h"   // Varan: main-thread phase accounting
 #include "nsIScriptGlobalObject.h"
 #include "nsIScriptObjectPrincipal.h"
 #include "nsIDOMChromeWindow.h"
@@ -1081,6 +1082,10 @@ nsJSContext::GarbageCollectNow(JS::gcreason::Reason aReason,
   PROFILER_LABEL("nsJSContext", "GarbageCollectNow",
     js::ProfileEntry::Category::GC);
 
+  // Varan: covers both the non-incremental collection and each incremental slice --
+  // the inter-slice timer re-enters here, so slices are summed rather than missed.
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_GC);
+
   MOZ_ASSERT_IF(aSliceMillis, aIncremental == IncrementalGC);
 
   KillGCTimer();
@@ -1336,6 +1341,8 @@ nsJSContext::CycleCollectNow(nsICycleCollectorListener *aListener,
     return;
   }
 
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_CC);
+
   PROFILER_LABEL("nsJSContext", "CycleCollectNow",
     js::ProfileEntry::Category::CC);
 
@@ -1354,6 +1361,10 @@ nsJSContext::RunCycleCollectorSlice()
 
   PROFILER_LABEL("nsJSContext", "RunCycleCollectorSlice",
     js::ProfileEntry::Category::CC);
+
+  // Varan: the sliced path. Nested inside CycleCollectNow when that is what drove it,
+  // and the outermost-only rule keeps the two from double counting.
+  mozilla::varan::AutoPhase varanPhase(mozilla::varan::PHASE_CC);
 
   gCCStats.PrepareForCycleCollectionSlice();
 

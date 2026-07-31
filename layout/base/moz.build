@@ -99,6 +99,7 @@ EXPORTS += [
     'StackArena.h',
     'Units.h',
     'UnitTransforms.h',
+    'VaranPhases.h',
     'WordMovementType.h',
 ]
 
