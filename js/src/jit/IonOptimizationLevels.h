@@ -125,35 +125,16 @@ class OptimizationInfo
     uint32_t compilerWarmUpThreshold_;
 
     // Default compiler warmup threshold, unless it is overridden.
-#if defined(_M_ARM)
-    // Varan 2026-07-30: 1000 -> 300 on ARM32 Windows RT.
-    //
-    // WHY. Device phase accounting (VaranPhases) measured ~95% of main-thread blockage as
-    // executing JS, and a Baseline-OFF A/B confirmed that time is in BASELINE-compiled code
-    // (1.87x slower per JS entry with Baseline off). An earlier Ion on/off A/B had moved page
-    // load only +1.3%, which reads as "Ion is useless here" but is better explained by Ion
-    // never being REACHED: a page-load script's functions run tens to hundreds of times, not
-    // 1000, so they tier to Baseline and stop there. This is the cheapest test of that
-    // explanation, and if it is right it is also the fix.
-    //
-    // WHY 300 AND NOT 0. Small functions (bytecode <= 130) already tier at 100
-    // (CompilerSmallFunctionWarmupThreshold below), so 300 keeps the ordering between the two
-    // thresholds intact. Eager Ion is explicitly NOT wanted: compiling everything would trade
-    // one main-thread cost for another, and this device has 2 GB.
-    //
-    // RISK, STATED. This pushes considerably more code through Ion, which on this port is the
-    // LESS exercised tier -- Baseline is device-proven over months, Ion only since 2026-07-25.
-    // If the next device trip shows new crashes or wrong answers rather than a speed-up, revert
-    // this constant FIRST before suspecting anything else in the batch.
-    //
-    // NB there is no pref for this. XPConnect only ever passes 0 or -1 to
-    // JSJITCOMPILER_ION_WARMUP_TRIGGER (XPCJSContext.cpp:1475-1478), driven by the boolean
-    // javascript.options.ion.unsafe_eager_compilation, so an arbitrary N is unreachable at
-    // runtime except via setJitCompilerOption() from chrome JS. Hence a constant.
-    static const uint32_t CompilerWarmupThreshold = 300;
-#else
+// Varan 2026-07-31: REVERTED to upstream 1000. Lowering this to 300 was tried on device
+    // (m6-device/ion300-pkg4) and is a MEASURED REGRESSION, not an improvement:
+    //   JS cost per entry   7.02 ms (Ion@1000)  ->  10.53 / 20.20 / 13.62 ms (Ion@300)
+    //   worst single JS entry     30.3 s        ->  85.0 s
+    // i.e. 1.5x to 2.9x WORSE. That also refutes the theory it was meant to test: if page-load
+    // code never reached Ion, lowering the trigger would have changed nothing. Ion IS reached,
+    // and on this device it is a net LOSS -- so the cost of getting into Ion exceeds what Ion
+    // buys back. Do not re-lower this without first explaining WHY Ion is net-negative here;
+    // the leading suspect is that Ion compilation is not actually happening off-thread.
     static const uint32_t CompilerWarmupThreshold = 1000;
-#endif
 
     // How many invocations or loop iterations are needed before small functions
     // are compiled.
