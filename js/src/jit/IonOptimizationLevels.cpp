@@ -38,7 +38,26 @@ OptimizationInfo::initNormalOptimizationInfo()
     registerAllocator_ = RegisterAllocator_Backtracking;
 
     inlineMaxBytecodePerCallSiteMainThread_ = 550;
+#if defined(_M_ARM)
+    // Varan 2026-07-31: 1100 -> 550 on ARM32, i.e. the SAME budget upstream itself uses when
+    // off-thread compilation is unavailable (the line above). Not an invented number.
+    //
+    // WHY. IonBuilder::build() -- bytecode->MIR including ALL inlining -- runs on the MAIN
+    // THREAD unconditionally (Ion.cpp:2259-2264), before the off-thread decision at :2302.
+    // Only the BACK end is handed to a helper thread. So this budget does not govern helper
+    // work, it governs how much MAIN-THREAD work each Ion compile does. Upstream doubles it
+    // when off-thread is available on the reasoning that the compile is "free" -- which is
+    // true for the back end and false for the front end, and on a 1.4 GHz in-order Cortex-A9
+    // the front end is not free at all. Selected at IonBuilder.cpp:5718-5719.
+    //
+    // This is a heuristic, not correctness: worst case is slightly less inlining, i.e. mildly
+    // worse generated code in exchange for materially less main-thread time per compile. Given
+    // ~95% of main-thread blockage is JS and the front end is on that thread, that is the right
+    // side of the trade here.
+    inlineMaxBytecodePerCallSiteOffThread_ = 550;
+#else
     inlineMaxBytecodePerCallSiteOffThread_ = 1100;
+#endif
     inlineMaxCalleeInlinedBytecodeLength_ = 3550;
     inlineMaxTotalBytecodeLength_ = 85000;
     inliningMaxCallerBytecodeLength_ = 1600;
