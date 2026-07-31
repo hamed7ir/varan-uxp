@@ -5056,6 +5056,14 @@ Debugger::endTraceLogger(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+#endif // JS_TRACE_LOGGING -- Varan: isCompilableUnit is NOT a trace-logging
+        // method. It is an ordinary Debugger API entry point, referenced
+        // unconditionally from Debugger::static_methods, and upstream left it
+        // stranded inside the #ifdef opened at :4891. --disable-trace-logging
+        // therefore deletes real API and fails to link. Closed around it and
+        // reopened after; nothing moves, nothing changes when the logger is on.
+        // SWEPT: this is the ONLY such stranded function in the block
+        // (adoptDebuggeeValue sits after the #endif at :5195 already).
 bool
 Debugger::isCompilableUnit(JSContext* cx, unsigned argc, Value* vp)
 {
@@ -5108,6 +5116,7 @@ Debugger::isCompilableUnit(JSContext* cx, unsigned argc, Value* vp)
     args.rval().setBoolean(result);
     return true;
 }
+#ifdef JS_TRACE_LOGGING
 
 
 bool
