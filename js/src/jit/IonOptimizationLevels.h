@@ -262,7 +262,26 @@ class OptimizationInfo
         uint32_t compilerWarmUpThreshold = compilerWarmUpThreshold_;
         if (JitOptions.forcedDefaultIonWarmUpThreshold.isSome())
             compilerWarmUpThreshold = JitOptions.forcedDefaultIonWarmUpThreshold.ref();
+#if defined(_M_ARM)
+        // Varan 2026-07-31: PIN THE INLINING THRESHOLD TO ITS DEFAULT-DERIVED VALUE.
+        //
+        // This derivation is why the 1000 -> 300 warm-up experiment was NOT a single-variable
+        // experiment, and the result was misread because of it. CompilerWarmupThreshold feeds
+        // THREE things: the compile trigger itself, this inlining trigger (x0.125, so 125 -> 37)
+        // and inliningRecompileThreshold (x4 on top, so 500 -> 148). Dropping the trigger to 300
+        // therefore ALSO said "inline callees that are 3.4x colder" -- which enlarges every MIR
+        // graph and makes each main-thread IonBuilder::build() more expensive, at the same time
+        // as it made compiles ~3x more numerous. Two variables moved in the same harmful
+        // direction and the measurement could not tell them apart.
+        //
+        // Pinned to CompilerWarmupThreshold * factor -- i.e. exactly today's shipped behaviour at
+        // the default trigger -- so that any FUTURE warm-up experiment moves one variable only.
+        // This is deliberately NOT a behaviour change at the default; it is a change to what the
+        // knob means when someone turns it.
+        return uint32_t(CompilerWarmupThreshold * inliningWarmUpThresholdFactor_);
+#else
         return compilerWarmUpThreshold * inliningWarmUpThresholdFactor_;
+#endif
     }
 
     uint32_t inliningRecompileThreshold() const {

@@ -921,7 +921,31 @@ GlobalHelperThreadState::maxIonCompilationThreads() const
 {
     if (IsHelperThreadSimulatingOOM(js::oom::THREAD_TYPE_ION))
         return 1;
+#if defined(_M_ARM)
+    // Varan 2026-07-31: CAP CONCURRENT ION BACK ENDS ON ARM32.
+    //
+    // Returning threadCount makes the limit a no-op: checkTaskThreadLimit short-circuits to
+    // true whenever maxThreads >= threadCount, so ALL helper threads may run Ion back ends at
+    // once. threadCount here is cpuCount + EXCESS_THREADS = 4 + 4 = 8 on this Tegra 3
+    // (ThreadCountForCPUCount above), and they are created at DEFAULT priority
+    // (threading/windows/Thread.cpp, _beginthreadex with no SetThreadPriority).
+    //
+    // Eight compile threads plus the main thread is NINE runnable threads on FOUR in-order
+    // Cortex-A9 cores sharing 1 MB of L2. The main thread is then scheduled a fraction of one
+    // core while it is trying to run the page. This is the only mechanism found that can
+    // MULTIPLY a JS entry's duration rather than add to it, which is what a 30 s -> 85 s
+    // regression requires, and it also explains that regression's huge run-to-run spread
+    // (10.53 / 20.20 / 13.62 ms per entry) since it depends on instantaneous queue depth.
+    //
+    // Half the cores, minimum one. Ion still compiles off-thread; it just cannot starve the
+    // thread whose responsiveness is the entire problem. This cannot change generated code and
+    // so cannot introduce a JIT correctness bug. It also bounds peak memory: eight concurrent
+    // MIR graphs on 32 KB LifoAlloc chunks is real memory on a 2 GB device.
+    size_t cap = cpuCount / 2;
+    return cap ? cap : 1;
+#else
     return threadCount;
+#endif
 }
 
 size_t
