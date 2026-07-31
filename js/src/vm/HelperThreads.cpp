@@ -921,31 +921,25 @@ GlobalHelperThreadState::maxIonCompilationThreads() const
 {
     if (IsHelperThreadSimulatingOOM(js::oom::THREAD_TYPE_ION))
         return 1;
-#if defined(_M_ARM)
-    // Varan 2026-07-31: CAP CONCURRENT ION BACK ENDS ON ARM32.
+    // Varan 2026-07-31: A CAP WAS ADDED HERE AND THEN REMOVED THE SAME DAY. Do not re-add it
+    // without new evidence.
     //
-    // Returning threadCount makes the limit a no-op: checkTaskThreadLimit short-circuits to
-    // true whenever maxThreads >= threadCount, so ALL helper threads may run Ion back ends at
-    // once. threadCount here is cpuCount + EXCESS_THREADS = 4 + 4 = 8 on this Tegra 3
-    // (ThreadCountForCPUCount above), and they are created at DEFAULT priority
-    // (threading/windows/Thread.cpp, _beginthreadex with no SetThreadPriority).
+    // The reasoning was: threadCount == cpuCount + EXCESS_THREADS == 8 on this 4-core Tegra 3,
+    // maxIonCompilationThreads() returning threadCount makes checkTaskThreadLimit a no-op, so
+    // 8 Ion back ends plus the main thread could contend for 4 in-order cores -- the only
+    // mechanism found that MULTIPLIES a JS entry's duration rather than adding to it, which is
+    // what the 30 s -> 85 s regression seemed to need.
     //
-    // Eight compile threads plus the main thread is NINE runnable threads on FOUR in-order
-    // Cortex-A9 cores sharing 1 MB of L2. The main thread is then scheduled a fraction of one
-    // core while it is trying to run the page. This is the only mechanism found that can
-    // MULTIPLY a JS entry's duration rather than add to it, which is what a 30 s -> 85 s
-    // regression requires, and it also explains that regression's huge run-to-run spread
-    // (10.53 / 20.20 / 13.62 ms per entry) since it depends on instantaneous queue depth.
+    // THE DEVICE OWNER THEN REPORTED THAT ~70% OF CPU IS IDLE THROUGHOUT A YOUTUBE LOAD.
+    // That refutes it outright: on 4 cores, ~30% busy is about 1.2 cores, i.e. ONE thread
+    // running flat out and three cores doing nothing. If eight compile threads were contending,
+    // CPU would sit near 100%. There is no CPU starvation to fix, and capping would only
+    // REMOVE parallelism that is already going unused -- possibly making things worse.
     //
-    // Half the cores, minimum one. Ion still compiles off-thread; it just cannot starve the
-    // thread whose responsiveness is the entire problem. This cannot change generated code and
-    // so cannot introduce a JIT correctness bug. It also bounds peak memory: eight concurrent
-    // MIR graphs on 32 KB LifoAlloc chunks is real memory on a 2 GB device.
-    size_t cap = cpuCount / 2;
-    return cap ? cap : 1;
-#else
+    // The real shape of the problem is the opposite of contention: the work is SERIALISED on
+    // one thread while three cores idle. Look for what keeps work ON the main thread, not for
+    // what competes with it.
     return threadCount;
-#endif
 }
 
 size_t
