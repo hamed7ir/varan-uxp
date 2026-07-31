@@ -3840,7 +3840,13 @@ CodeGenerator::visitCallNative(LCallNative* call)
 
     markSafepointAt(safepointOffset, call);
 
+#ifdef JS_TRACE_LOGGING
+    // Varan: UPSTREAM BUG -- these two calls were unguarded while the methods they call are
+    // declared inside #ifdef JS_TRACE_LOGGING (jit/shared/CodeGenerator-shared.h:535-550), so
+    // --disable-trace-logging simply does not compile in this vintage. The sibling site at
+    // :2843-2846 IS guarded; these were missed. Same guard, same shape.
     emitTracelogStartEvent(TraceLogger_Call);
+#endif
 
     // Construct and execute call.
     masm.setupUnalignedABICall(tempReg);
@@ -3856,7 +3862,9 @@ CodeGenerator::visitCallNative(LCallNative* call)
     ensureOsiSpace();
     masm.callWithABI(JS_FUNC_TO_DATA_PTR(void*, native));
 
+#ifdef JS_TRACE_LOGGING
     emitTracelogStopEvent(TraceLogger_Call);
+#endif
 
     // Test for failure.
     masm.branchIfFalseBool(ReturnReg, masm.failureLabel());
