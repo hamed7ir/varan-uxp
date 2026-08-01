@@ -2166,6 +2166,32 @@ Now(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+// Varan (Track A, 2026-07-31): expose the ARM simulator's instruction counter.
+//
+// WHY: wall-clock timing is UNOBTAINABLE on this host. The noise is PROPORTIONAL to
+// run duration, so neither more iterations nor min-of-N helps -- proven by measurement
+// (5x ITER produced 5x noise, not 1/5th). Four runs across three harness revisions were
+// all correctly rejected by their own control. icount is DETERMINISTIC: same input,
+// same number, host load irrelevant. It is also what we actually want to compare --
+// instructions executed per operation -- for which wall clock was only ever a proxy.
+//
+// Returns -1 when no simulator is present. THAT IS THE CONTROL: it lets the harness
+// prove the counter is genuinely being read rather than silently defaulting to a
+// constant, which is the failure mode that has produced six vacuous gates in this
+// project. A harness reading a constant 0 would otherwise look perfectly stable.
+static bool
+SimIcount(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+#if defined(JS_SIMULATOR_ARM)
+    jit::Simulator* sim = jit::Simulator::Current();
+    args.rval().setDouble(sim ? double(sim->icount()) : -1.0);
+#else
+    args.rval().setDouble(-1.0);
+#endif
+    return true;
+}
+
 static bool
 PrintInternal(JSContext* cx, const CallArgs& args, RCFile* file)
 {
@@ -6238,6 +6264,13 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
     JS_FN_HELP("dateNow", Now, 0, 0,
 "dateNow()",
 "  Return the current time with sub-ms precision."),
+
+    JS_FN_HELP("simIcount", SimIcount, 0, 0,
+"simIcount()",
+"  Varan: ARM-simulator instruction count so far, or -1 when not simulating.\n"
+"  Deterministic -- use INSTEAD of dateNow for codegen measurement on this host,\n"
+"  where wall-clock noise is proportional to run duration and swamps the signal.\n"
+"  The -1 return is the control: it proves the counter is read, not defaulted."),
 
     JS_FN_HELP("help", Help, 0, 0,
 "help([name ...])",
