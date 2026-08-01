@@ -20,6 +20,14 @@ EXPORTS.mozilla.dom += [
     'SourceBufferList.h',
 ]
 
+# Varan B1: the InvalidStateError capture probe. NON-unified on purpose -- it owns
+# file-scope mutable state (the per-site repeat table, the event cap) and keeping
+# it in its own TU means that state cannot be perturbed by, or perturb, whatever
+# else lands in a Unified_cpp_*.cpp bucket. Capture only; no control-flow change.
+SOURCES += [
+    'VaranMSEProbe.cpp',
+]
+
 UNIFIED_SOURCES += [
     'ContainerParser.cpp',
     'MediaSource.cpp',

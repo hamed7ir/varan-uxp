@@ -4,6 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "MediaSource.h"
+#include "VaranMSEProbe.h"   // Varan B1: capture only
 
 #include "AsyncEventRunner.h"
 #include "DecoderTraits.h"
@@ -188,7 +189,7 @@ MediaSource::SetDuration(double aDuration, ErrorResult& aRv)
   }
   if (mReadyState != MediaSourceReadyState::Open ||
       mSourceBuffers->AnyUpdating()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return;
   }
   DurationChange(aDuration, aRv);
@@ -224,7 +225,7 @@ MediaSource::AddSourceBuffer(const nsAString& aType, ErrorResult& aRv)
     return nullptr;
   }
   if (mReadyState != MediaSourceReadyState::Open) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return nullptr;
   }
   MediaContentType contentType{aType};
@@ -297,7 +298,7 @@ MediaSource::EndOfStream(const Optional<MediaSourceEndOfStreamError>& aError, Er
           aError.WasPassed() ? uint32_t(aError.Value()) : 0);
   if (mReadyState != MediaSourceReadyState::Open ||
       mSourceBuffers->AnyUpdating()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return;
   }
 
@@ -362,7 +363,7 @@ MediaSource::SetLiveSeekableRange(double aStart, double aEnd, ErrorResult& aRv)
   // 1. If the readyState attribute is not "open" then throw an InvalidStateError
   // exception and abort these steps.
   if (mReadyState != MediaSourceReadyState::Open) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return;
   }
 
@@ -389,7 +390,7 @@ MediaSource::ClearLiveSeekableRange(ErrorResult& aRv)
   // 1. If the readyState attribute is not "open" then throw an InvalidStateError
   // exception and abort these steps.
   if (mReadyState != MediaSourceReadyState::Open) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return;
   }
 
@@ -447,6 +448,10 @@ MediaSource::MediaSource(nsPIDOMWindowInner* aWindow)
   , mReadyState(MediaSourceReadyState::Closed)
 {
   MOZ_ASSERT(NS_IsMainThread());
+  // Varan B1: arm the InvalidStateError capture at the entry to MSE use, so an
+  // EMPTY capture means "armed, never fired" -- a finding -- rather than being
+  // indistinguishable from "probe absent from this build". Idempotent.
+  VaranArmMSEProbe();
   mSourceBuffers = new SourceBufferList(this);
   mActiveSourceBuffers = new SourceBufferList(this);
 
@@ -527,7 +532,7 @@ MediaSource::DurationChange(double aNewDuration, ErrorResult& aRv)
   // of any buffered coded frames for all SourceBuffer objects in sourceBuffers,
   // then throw an InvalidStateError exception and abort these steps.
   if (aNewDuration < mSourceBuffers->HighestStartTime()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, this, nullptr);
     return;
   }
 

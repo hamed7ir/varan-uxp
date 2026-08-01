@@ -4,6 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "SourceBuffer.h"
+#include "VaranMSEProbe.h"   // Varan B1: capture only
 
 #include "AsyncEventRunner.h"
 #include "MediaData.h"
@@ -51,7 +52,7 @@ SourceBuffer::SetMode(SourceBufferAppendMode aMode, ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("SetMode(aMode=%d)", aMode);
   if (!IsAttached() || mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (mCurrentAttributes.mGenerateTimestamps &&
@@ -64,7 +65,7 @@ SourceBuffer::SetMode(SourceBufferAppendMode aMode, ErrorResult& aRv)
     mMediaSource->SetReadyState(MediaSourceReadyState::Open);
   }
   if (mCurrentAttributes.GetAppendState() == AppendState::PARSING_MEDIA_SEGMENT){
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
 
@@ -82,7 +83,7 @@ SourceBuffer::SetTimestampOffset(double aTimestampOffset, ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("SetTimestampOffset(aTimestampOffset=%f)", aTimestampOffset);
   if (!IsAttached() || mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   MOZ_ASSERT(mMediaSource->ReadyState() != MediaSourceReadyState::Closed);
@@ -90,7 +91,7 @@ SourceBuffer::SetTimestampOffset(double aTimestampOffset, ErrorResult& aRv)
     mMediaSource->SetReadyState(MediaSourceReadyState::Open);
   }
   if (mCurrentAttributes.GetAppendState() == AppendState::PARSING_MEDIA_SEGMENT){
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   mCurrentAttributes.SetApparentTimestampOffset(aTimestampOffset);
@@ -106,7 +107,7 @@ SourceBuffer::GetBuffered(ErrorResult& aRv)
   // http://w3c.github.io/media-source/index.html#widl-SourceBuffer-buffered
   // 1. If this object has been removed from the sourceBuffers attribute of the parent media source then throw an InvalidStateError exception and abort these steps.
   if (!IsAttached()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return nullptr;
   }
   bool rangeChanged = true;
@@ -138,7 +139,7 @@ SourceBuffer::SetAppendWindowStart(double aAppendWindowStart, ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("SetAppendWindowStart(aAppendWindowStart=%f)", aAppendWindowStart);
   if (!IsAttached() || mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (aAppendWindowStart < 0 ||
@@ -155,7 +156,7 @@ SourceBuffer::SetAppendWindowEnd(double aAppendWindowEnd, ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("SetAppendWindowEnd(aAppendWindowEnd=%f)", aAppendWindowEnd);
   if (!IsAttached() || mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (IsNaN(aAppendWindowEnd) ||
@@ -190,15 +191,15 @@ SourceBuffer::Abort(ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("Abort()");
   if (!IsAttached()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (mMediaSource->ReadyState() != MediaSourceReadyState::Open) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (mPendingRemoval.Exists()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   AbortBufferAppend();
@@ -231,11 +232,11 @@ SourceBuffer::Remove(double aStart, double aEnd, ErrorResult& aRv)
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("Remove(aStart=%f, aEnd=%f)", aStart, aEnd);
   if (!IsAttached()) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return;
   }
   if (IsNaN(mMediaSource->Duration()) ||
@@ -486,7 +487,7 @@ SourceBuffer::PrepareAppend(const uint8_t* aData, uint32_t aLength, ErrorResult&
   typedef TrackBuffersManager::EvictDataResult Result;
 
   if (!IsAttached() || mUpdating) {
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return nullptr;
   }
 
@@ -495,7 +496,7 @@ SourceBuffer::PrepareAppend(const uint8_t* aData, uint32_t aLength, ErrorResult&
   if (!mMediaSource->GetDecoder() ||
       mMediaSource->GetDecoder()->OwnerHasError()) {
     MSE_DEBUG("HTMLMediaElement.error is not null");
-    aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
+    VARAN_MSE_INVALID_STATE(aRv, mMediaSource, this);
     return nullptr;
   }
 
