@@ -40,11 +40,25 @@ struct VaranSiteRec {
 static VaranSiteRec gSites[kMaxSites];
 static int gSiteCount = 0;
 
-// A cap, because "no silent caps" is a standing rule here. If the error turns
-// out to fire thousands of times, per-event file I/O would itself distort the
-// run -- so it stops, and SAYS it stopped, rather than quietly truncating.
+// THE CAP. If InvalidStateError fires in a tight loop -- entirely plausible,
+// since the symptom under investigation is a STALL -- then unbounded per-event
+// file I/O would distort the very timing the capture exists to measure, and the
+// file would grow without bound on a device with eMMC storage.
+//
+// So: the first kMaxEvents are logged IN FULL. After that the probe keeps
+// COUNTING but stops writing per event, and emits a periodic summary carrying
+// the running total and the per-site breakdown.
+//
+// ★ WHY PERIODIC SUMMARIES AND NOT ONLY A TOTAL AT SHUTDOWN.
+//   A run that stalls is a run that gets force-closed or killed, and a shutdown
+//   hook does not run then -- the total would be lost in exactly the scenario
+//   this is built for. Summaries are emitted on a DOUBLING schedule (400, 800,
+//   1600, ...), so the cost is O(log n) writes for n events -- negligible --
+//   and a kill at any moment still leaves a recent total on disk, accurate to
+//   within a factor of two, with the last exact checkpoint above it.
 static const uint32_t kMaxEvents = 200;
 static uint32_t gEventCount = 0;
+static uint32_t gNextSummary = 0;
 static bool gCapAnnounced = false;
 static bool gArmed = false;
 
@@ -129,20 +143,56 @@ VaranResolvePath()
   gPathUsable = false;   // announced by VaranArmMSEProbe via the log module
 }
 
+// ★ OPEN ONCE, FLUSH PER LINE -- not fopen/fclose per event.
+//   v1 opened and closed the file for every event. On the device that is eMMC,
+//   and the expensive part of a small append is the open/close, not the write.
+//   Up to 200 of those could land INSIDE the stall window -- i.e. the capture
+//   would be perturbing the exact timing it exists to measure. A capture that
+//   changes the behaviour it captures is not a capture.
+//   fflush() is what makes this safe: it hands the bytes to the OS, so they
+//   survive the process being killed or force-closed, which is the realistic
+//   end of a run that stalls. (Only a power cut loses them, and a per-event
+//   fclose would not have saved that either.) So this is strictly cheaper AND
+//   equally durable -- the v1 comment claiming otherwise was simply wrong.
+static FILE* gFile = nullptr;
+
 static void
 VaranWriteLine(const char* aLine)
 {
   VaranResolvePath();
   if (!gPathUsable) {
-    return;   // the log module still carries it; the ARMED path says so
+    return;   // the log module still carries it; the ARMED line says so
   }
-  FILE* f = fopen(gPath, "a");
-  if (!f) {
-    return;
+  if (!gFile) {
+    gFile = fopen(gPath, "a");
+    if (!gFile) {
+      gPathUsable = false;
+      return;
+    }
   }
-  fputs(aLine, f);
-  fputc('\n', f);
-  fclose(f);
+  fputs(aLine, gFile);
+  fputc('\n', gFile);
+  fflush(gFile);
+}
+
+// One line carrying the running total and the full per-site breakdown. Bounded:
+// there are 20 instrumented sites and kMaxSites is 32, so the whole table fits.
+static void
+VaranEmitSummary(const char* aWhy, double aNowMs)
+{
+  char line[1400];
+  int off = snprintf(line, sizeof(line),
+                     "=== VARAN-MSE-PROBE %s  total=%u  t=+%.3fs since process start"
+                     "  per-site:", aWhy, gEventCount, aNowMs / 1000.0);
+  for (int i = 0; i < gSiteCount; i++) {
+    if (off <= 0 || off >= (int)sizeof(line)) {
+      break;
+    }
+    off += snprintf(line + off, sizeof(line) - off, " %s:%d=%u",
+                    gSites[i].mSite, gSites[i].mLine, gSites[i].mCount);
+  }
+  VaranWriteLine(line);
+  VARAN_MSE_LOG("%s", line);
 }
 
 static const char*
@@ -202,24 +252,12 @@ VaranReportInvalidState(const char* aSite,
     return;
   }
 
-  if (gEventCount >= kMaxEvents) {
-    if (!gCapAnnounced) {
-      gCapAnnounced = true;
-      char capline[256];
-      snprintf(capline, sizeof(capline),
-               "=== VARAN-MSE-PROBE CAP REACHED at %u events -- further throws are "
-               "NOT recorded (per-event file I/O would distort the run) ===",
-               kMaxEvents);
-      VaranWriteLine(capline);
-      VARAN_MSE_LOG("%s", capline);
-    }
-    return;
-  }
   gEventCount++;
-
   double nowMs = VaranElapsedMs();
 
-  // Repeat count + interval since the previous throw at THIS site.
+  // Site bookkeeping happens for EVERY event, including past the cap -- it is a
+  // memory increment with no I/O, and it is what lets the summary say where the
+  // events came from rather than only how many there were.
   uint32_t count = 1;
   double sinceLast = -1.0;
   int i = 0;
@@ -239,6 +277,26 @@ VaranReportInvalidState(const char* aSite,
     gSites[gSiteCount].mCount = 1;
     gSites[gSiteCount].mLastMs = nowMs;
     gSiteCount++;
+  }
+
+  // Past the cap: count only, with a doubling-schedule summary.
+  if (gEventCount > kMaxEvents) {
+    if (!gCapAnnounced) {
+      gCapAnnounced = true;
+      gNextSummary = kMaxEvents * 2;
+      char capline[256];
+      snprintf(capline, sizeof(capline),
+               "=== VARAN-MSE-PROBE CAP REACHED at %u events -- per-event lines STOP "
+               "here, but COUNTING CONTINUES; totals follow on a doubling schedule ===",
+               kMaxEvents);
+      VaranWriteLine(capline);
+      VARAN_MSE_LOG("%s", capline);
+    }
+    if (gEventCount >= gNextSummary) {
+      VaranEmitSummary("RUNNING TOTAL", nowMs);
+      gNextSummary *= 2;
+    }
+    return;
   }
 
   char sbstate[128];
