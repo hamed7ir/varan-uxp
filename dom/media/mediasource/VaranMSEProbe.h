@@ -55,7 +55,17 @@ class SourceBuffer;
 
 // Called from the throw sites via VARAN_MSE_INVALID_STATE below.
 // aMediaSource / aSourceBuffer may be null; both are only read, never held.
+//
+// aLine is NOT redundant with aSite. Several functions here contain more than one
+// InvalidStateError site (Abort has three; SetMode, SetTimestampOffset, Remove and
+// PrepareAppend have two each), and with only __func__ the calls are IDENTICAL --
+// LLVM tail-merges them into a single call the failure branches jump to. That was
+// verified on the built object: 20 source sites collapsed to 14 relocations, one
+// per function. Nothing was lost from "does the probe fire" (14 functions, 14
+// calls) but the capture could not say WHICH condition fired. Passing __LINE__
+// makes each call distinct, so folding cannot occur and the site is exact.
 void VaranReportInvalidState(const char* aSite,
+                             int aLine,
                              MediaSource* aMediaSource,
                              SourceBuffer* aSourceBuffer);
 
@@ -67,10 +77,10 @@ void VaranArmMSEProbe();
 
 // Replaces a bare `aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR)`. The throw is
 // UNCHANGED -- this only records what state produced it.
-#define VARAN_MSE_INVALID_STATE(rv_, ms_, sb_)                              \
-  do {                                                                      \
-    mozilla::dom::VaranReportInvalidState(__func__, (ms_), (sb_));          \
-    (rv_).Throw(NS_ERROR_DOM_INVALID_STATE_ERR);                            \
+#define VARAN_MSE_INVALID_STATE(rv_, ms_, sb_)                                \
+  do {                                                                        \
+    mozilla::dom::VaranReportInvalidState(__func__, __LINE__, (ms_), (sb_));  \
+    (rv_).Throw(NS_ERROR_DOM_INVALID_STATE_ERR);                              \
   } while (0)
 
 #endif // mozilla_dom_VaranMSEProbe_h_

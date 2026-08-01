@@ -33,6 +33,7 @@ static LazyLogModule gVaranMSELog("VaranMSE");
 static const int kMaxSites = 32;
 struct VaranSiteRec {
   const char* mSite;
+  int mLine;
   uint32_t mCount;
   double mLastMs;
 };
@@ -63,23 +64,79 @@ VaranElapsedMs()
 // the tester having exported the right MOZ_LOG string can come back empty for
 // the wrong reason. Opened per event and closed -- events are meant to be rare,
 // and an always-open handle would be lost on a hard kill.
+//
+// ★ WHY THIS TRIES SEVERAL PATHS INSTEAD OF ONE.
+//   v1 resolved %TEMP% and returned SILENTLY if the open failed. That is a
+//   silent-failure mode that destroys the property the whole design rests on:
+//   "no THROW lines" is supposed to mean "armed, never fired" -- a finding --
+//   but an unwritable path produces exactly the same absence of output, and it
+//   also swallows the ARMED line, so the tester cannot tell the two apart.
+//   This browser has only ever been run as Administrator; the very same trip
+//   tests NON-ELEVATED startup, where the token differs. So the failure is not
+//   hypothetical, and "check the path" is a weaker fix than "cannot fail
+//   silently". Candidates are tried in order, the first that opens wins, and
+//   the winner is recorded IN the ARMED line so the tester knows where to look.
+static char gPath[1024];
+static bool gPathResolved = false;
+static bool gPathUsable = false;
+
+static bool
+VaranTryPath(const char* aPath)
+{
+  if (!aPath || !*aPath) {
+    return false;
+  }
+  FILE* f = fopen(aPath, "a");
+  if (!f) {
+    return false;
+  }
+  fclose(f);
+  size_t n = strlen(aPath);
+  if (n >= sizeof(gPath)) {
+    return false;
+  }
+  memcpy(gPath, aPath, n + 1);
+  return true;
+}
+
+static void
+VaranResolvePath()
+{
+  if (gPathResolved) {
+    return;
+  }
+  gPathResolved = true;
+
+  // 1. explicit override
+  if (VaranTryPath(getenv("VARAN_MSE_LOG"))) { gPathUsable = true; return; }
+
+  // 2-4. the usual temp locations, then the profile-independent fallbacks.
+  static const char* kVars[] = { "TEMP", "TMP", "LOCALAPPDATA", "USERPROFILE" };
+  char buf[1024];
+  for (size_t i = 0; i < sizeof(kVars) / sizeof(kVars[0]); i++) {
+    const char* base = getenv(kVars[i]);
+    if (!base || !*base) {
+      continue;
+    }
+    snprintf(buf, sizeof(buf), "%s\\varan-mse-invalidstate.log", base);
+    if (VaranTryPath(buf)) { gPathUsable = true; return; }
+  }
+
+  // 5. last resort: the current directory, which for a normal launch is the
+  //    install directory next to varan.exe.
+  if (VaranTryPath("varan-mse-invalidstate.log")) { gPathUsable = true; return; }
+
+  gPathUsable = false;   // announced by VaranArmMSEProbe via the log module
+}
+
 static void
 VaranWriteLine(const char* aLine)
 {
-  const char* path = getenv("VARAN_MSE_LOG");
-  char buf[1024];
-  if (!path || !*path) {
-    const char* tmp = getenv("TEMP");
-    if (!tmp || !*tmp) {
-      tmp = getenv("TMP");
-    }
-    if (!tmp || !*tmp) {
-      return;   // nowhere safe to write; the log module still has it
-    }
-    snprintf(buf, sizeof(buf), "%s\\varan-mse-invalidstate.log", tmp);
-    path = buf;
+  VaranResolvePath();
+  if (!gPathUsable) {
+    return;   // the log module still carries it; the ARMED path says so
   }
-  FILE* f = fopen(path, "a");
+  FILE* f = fopen(gPath, "a");
   if (!f) {
     return;
   }
@@ -109,18 +166,32 @@ VaranArmMSEProbe()
     return;
   }
   gArmed = true;
-  char line[512];
+  VaranResolvePath();
+
+  char line[1280];
   snprintf(line, sizeof(line),
-           "=== VARAN-MSE-PROBE ARMED  t=+%.3fs since process start ===  "
+           "=== VARAN-MSE-PROBE ARMED  t=+%.3fs since process start  file=%s ===  "
            "(build carries the B1 InvalidStateError capture; if no THROW lines "
            "follow, the error did NOT fire -- that is a result, not a missing probe)",
-           VaranElapsedMs() / 1000.0);
+           VaranElapsedMs() / 1000.0,
+           gPathUsable ? gPath : "<NONE WRITABLE>");
   VaranWriteLine(line);
   VARAN_MSE_LOG("%s", line);
+
+  if (!gPathUsable) {
+    // The one case where the file channel cannot report its own failure. Say it
+    // on the only channel left, so a capture that comes back empty is not
+    // mistaken for the "armed, never fired" finding.
+    VARAN_MSE_LOG("*** VARAN-MSE-PROBE: NO WRITABLE LOG PATH (tried VARAN_MSE_LOG, "
+                  "TEMP, TMP, LOCALAPPDATA, USERPROFILE, CWD). The file capture is "
+                  "DEAD for this run -- an empty file is NOT the 'never fired' "
+                  "result. Re-run with VARAN_MSE_LOG set to a writable path.");
+  }
 }
 
 void
 VaranReportInvalidState(const char* aSite,
+                        int aLine,
                         MediaSource* aMediaSource,
                         SourceBuffer* aSourceBuffer)
 {
@@ -153,7 +224,7 @@ VaranReportInvalidState(const char* aSite,
   double sinceLast = -1.0;
   int i = 0;
   for (; i < gSiteCount; i++) {
-    if (gSites[i].mSite == aSite) {
+    if (gSites[i].mSite == aSite && gSites[i].mLine == aLine) {
       break;
     }
   }
@@ -164,6 +235,7 @@ VaranReportInvalidState(const char* aSite,
     gSites[i].mLastMs = nowMs;
   } else if (gSiteCount < kMaxSites) {
     gSites[gSiteCount].mSite = aSite;
+    gSites[gSiteCount].mLine = aLine;
     gSites[gSiteCount].mCount = 1;
     gSites[gSiteCount].mLastMs = nowMs;
     gSiteCount++;
@@ -182,15 +254,15 @@ VaranReportInvalidState(const char* aSite,
   char line[768];
   if (sinceLast >= 0.0) {
     snprintf(line, sizeof(line),
-             "VARAN-MSE THROW InvalidStateError  site=%s  ms=%p readyState=%s  %s  "
+             "VARAN-MSE THROW InvalidStateError  site=%s:%d  ms=%p readyState=%s  %s  "
              "t=+%.3fs since process start  n=%u  since-previous-at-site=%.3fs",
-             aSite, (void*)aMediaSource, VaranReadyStateStr(aMediaSource), sbstate,
+             aSite, aLine, (void*)aMediaSource, VaranReadyStateStr(aMediaSource), sbstate,
              nowMs / 1000.0, count, sinceLast / 1000.0);
   } else {
     snprintf(line, sizeof(line),
-             "VARAN-MSE THROW InvalidStateError  site=%s  ms=%p readyState=%s  %s  "
+             "VARAN-MSE THROW InvalidStateError  site=%s:%d  ms=%p readyState=%s  %s  "
              "t=+%.3fs since process start  n=%u  (first at this site)",
-             aSite, (void*)aMediaSource, VaranReadyStateStr(aMediaSource), sbstate,
+             aSite, aLine, (void*)aMediaSource, VaranReadyStateStr(aMediaSource), sbstate,
              nowMs / 1000.0, count);
   }
   VaranWriteLine(line);
