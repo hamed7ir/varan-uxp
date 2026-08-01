@@ -2192,6 +2192,47 @@ SimIcount(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+// Varan (Track A, 2026-08-01): STATIC emitted footprint of a function's Baseline code.
+//
+// WHY, and why it is NOT the same question as simIcount():
+//   simIcount() counts instructions EXECUTED. On this backend that also settles bytes fetched,
+//   because the Varan Thumb-2 encoder is WIDE-ONLY -- every emission goes through
+//   Assembler::writeInstT2 -> m_buffer.putInt(uint32_t), 4 bytes, with no 16-bit path at all
+//   (the invariant is structural: it also permanently rejects IT blocks, and the simulator has
+//   no IT decoder). So dynamic bytes = 4 x icount on BOTH shells and the byte ratio is
+//   identically the instruction ratio. Thumb-2's code-density advantage is unavailable here by
+//   construction, not by accident.
+//
+//   What is NOT entailed is the STATIC footprint, because ARM emits constant pools INLINE in the
+//   instruction stream (hence AutoForbidPools). A32 resolves many constants with a pool word;
+//   wide-only Thumb-2 often uses movw/movt instead -- more instructions, no pool word. Those can
+//   net out in either direction, and footprint is what occupies a 32 KB L1I.
+//
+//   instructionsSize() is the right accessor: it is the assembler buffer's size, so it INCLUDES
+//   inline pool words. Returns -1 when there is no Baseline code, on the same control discipline
+//   as simIcount() -- a caller must be able to tell "not compiled" from a real measurement.
+static bool
+BaselineCodeSize(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    if (args.length() < 1 || !args[0].isObject() || !args[0].toObject().is<JSFunction>()) {
+        JS_ReportErrorASCII(cx, "baselineCodeSize: expected a function");
+        return false;
+    }
+    RootedFunction fun(cx, &args[0].toObject().as<JSFunction>());
+    if (!fun->isInterpreted() || !fun->nonLazyScript()) {
+        args.rval().setDouble(-1.0);
+        return true;
+    }
+    RootedScript script(cx, fun->nonLazyScript());
+    if (!script->hasBaselineScript()) {
+        args.rval().setDouble(-1.0);
+        return true;
+    }
+    args.rval().setDouble(double(script->baselineScript()->method()->instructionsSize()));
+    return true;
+}
+
 static bool
 PrintInternal(JSContext* cx, const CallArgs& args, RCFile* file)
 {
@@ -6271,6 +6312,13 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
 "  Deterministic -- use INSTEAD of dateNow for codegen measurement on this host,\n"
 "  where wall-clock noise is proportional to run duration and swamps the signal.\n"
 "  The -1 return is the control: it proves the counter is read, not defaulted."),
+
+    JS_FN_HELP("baselineCodeSize", BaselineCodeSize, 1, 0,
+"baselineCodeSize(fn)",
+"  Varan: bytes of Baseline machine code emitted for fn, including inline constant\n"
+"  pools, or -1 if fn has no Baseline code. Pairs with simIcount: that counts\n"
+"  instructions EXECUTED, this measures the STATIC footprint that occupies I-cache.\n"
+"  Call fn at least once under --baseline-eager first."),
 
     JS_FN_HELP("help", Help, 0, 0,
 "help([name ...])",
