@@ -58,10 +58,16 @@ elif CONFIG['CPU_ARCH'] == 'arm':
     # ARM .asm (A32 dialect: forbidden on Win RT, faults across scheduler preemption). The
     # C paths still decode/encode WebM; rtcd dispatches to them statically.
     if CONFIG['OS_TARGET'] == 'WINNT':
+        # Varan v1.1: keep the NEON C INTRINSICS (_neon.c) and the _arm.c dispatch
+        # glue that calls them. Drop only what genuinely cannot build here:
+        #   *.asm            A32 dialect, forbidden on Windows RT
+        #   *dotprod*, *i8mm*  ARMv8.2-A extensions; this target is ARMv7
+        # The _arm.c glue was previously dropped BECAUSE the _neon fns it calls were
+        # dropped; with the intrinsics back it is required, not optional.
         arm_asm_files = [f for f in arm_asm_files
-                         if 'neon' not in f.lower() and not f.endswith('.asm')
-                            and not f.endswith('_arm.c')]  # arm glue (e.g. loopfilter_arm.c)
-                                                           # calls the dropped _neon fns -> undefined
+                         if not f.endswith('.asm')
+                            and 'dotprod' not in f.lower()
+                            and 'i8mm' not in f.lower()]
 
     if CONFIG['VPX_AS_CONVERSION']:
         SOURCES += sorted([

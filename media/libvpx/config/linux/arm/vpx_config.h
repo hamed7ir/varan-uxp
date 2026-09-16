@@ -22,8 +22,18 @@
    (forbidden on Win RT). Keep C-only here + drop the NEON sources in moz.build. Real
    Linux/arm (which also reads this config) keeps NEON. */
 #if defined(_WIN32)
+/* Varan v1.1: HAVE_NEON_ASM stays 0 -- libvpx's ARM .asm is A32 and is
+   dialect-forbidden on Windows RT. But HAVE_NEON is now 1: the _neon.c files are C
+   INTRINSICS, which clang-cl compiles to Thumb-2 NEON, exactly as M4.2 already shipped
+   for libpng / libjpeg-turbo / libwebp (measured 18% / 26% / 33% faster, pixel-exact).
+   MEASURED 2026-09-15 before flipping this: of 97 _neon.c files, 73 compile clean with
+   -Zi and ZERO produce the "unknown codeview register" ICE that this block previously
+   cited as the reason for disabling them. Of the 24 that fail, 12 are highbd, 8 are
+   ARMv8.2-only (dotprod/i8mm) and 3 are encoder-side; the single decode-relevant failure
+   (vpx_convolve_neon.c) fails ONLY because HAVE_NEON=0 removes its rtcd declarations,
+   i.e. it is a consequence of this flag, not a cause. */
 #define HAVE_NEON_ASM 0
-#define HAVE_NEON 0
+#define HAVE_NEON 1
 #else
 #define HAVE_NEON_ASM 1
 #define HAVE_NEON 1
