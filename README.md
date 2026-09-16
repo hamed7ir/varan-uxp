@@ -12,15 +12,15 @@ Surface 2, Tegra 3 / Cortex-A9). Upstream UXP does not target this platform.
 | | |
 |---|---|
 | upstream | `https://repo.palemoon.org/MoonchildProductions/UXP` |
-| fork point | `659c690d5b34cc3e46c5ba8a6e00f134d8d20c35` — UXP `RB_20260624` |
-| application | [varan](https://github.com/hamed7ir/varan), fork point `0d869b85` (Pale Moon 34.3.1_Release) |
+| fork point | `81fce269f524c16cca7c3ce84b66002ce9b7da8b` — UXP `RB_20260914` |
+| application | [varan](https://github.com/hamed7ir/varan), fork point `fcd973b3` (Pale Moon 35.0.0_Release) |
 
 GitHub cannot draw a fork relationship to a Gitea-hosted upstream, so the fork
-point is recorded here. `git merge-base HEAD 659c690d` should return `659c690d`
+point is recorded here. `git merge-base HEAD 81fce269` should return `81fce269`
 exactly; if it does not, this README is stale.
 
-The two fork points are the **exact pair** — upstream `0d869b85`'s `platform`
-gitlink is `659c690d`.
+The two fork points are the **exact pair** — upstream `fcd973b3`'s `platform`
+gitlink is `81fce269`.
 
 ## What the port actually required
 
@@ -54,7 +54,7 @@ deliberately.
 
 Mozilla Public License 2.0, as upstream. Modifications are disclosed by the git
 history: Varan commits are prefixed `Varan:`, and the full diff against
-`659c690d` is the complete set of changes. Upstream copyright notices are
+`81fce269` is the complete set of changes. Upstream copyright notices are
 preserved.
 
 ## Diagnostics shipped in release builds
