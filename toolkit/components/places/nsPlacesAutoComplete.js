@@ -242,7 +242,21 @@ AutoCompleteStatementCallbackWrapper.prototype = {
 
   handleResult: function ACSCW_handleResult(aResultSet)
   {
-    this._callback.handleResult.apply(this._callback, arguments);
+    // Varan v1.1: apply the SAME guard handleCompletion already applies below.
+    // This class exists (see its doc comment) "to ensure that handleCompletion is
+    // not dispatched if the query is no longer tracked" -- but handleResult was
+    // left unguarded, so a result batch already queued for a CANCELLED query still
+    // reaches the consumer. Every keystroke runs startSearch -> stopSearch ->
+    // _finishSearch, which clears _result and _usedPlaces synchronously on the main
+    // thread; a late batch then runs _inResults() against undefined.
+    // Scope, stated honestly: a JS exception in an XPCOM callback is reported and
+    // swallowed, so this produces a broken dropdown rather than a dead process. It
+    // is not known to be the cause of the reported address-bar crash; it is a real
+    // defect found while investigating it, and the guard is free.
+    if (!this._autocomplete.isSearchComplete() &&
+        this._autocomplete.isPendingSearch(this._handle)) {
+      this._callback.handleResult.apply(this._callback, arguments);
+    }
   },
 
   handleError: function ACSCW_handleError(aError)
@@ -420,7 +434,8 @@ function nsPlacesAutoComplete()
                                 h.visit_count, h.typed, bookmarked,
                                 t.open_count,
                                 :matchBehavior, :searchBehavior)
-       ORDER BY rank DESC, h.frecency DESC`
+       ORDER BY rank DESC, h.frecency DESC
+       LIMIT :maxResults`
     );
   });
 
@@ -1133,6 +1148,12 @@ nsPlacesAutoComplete.prototype = {
     params.query_type = kQueryTypeFiltered;
     params.matchBehavior = aMatchBehavior;
     params.searchBehavior = this._behavior;
+    // Varan v1.1: bound the adaptive query, as its two siblings already are
+    // (_getBoundSearchQuery and _getBoundOpenPagesQuery both bind maxResults).
+    // This one was the only autocomplete query with no LIMIT, so a broad prefix
+    // could return the whole matching history to the consumer, one row at a time,
+    // on every keystroke.
+    params.maxResults = this._maxRichResults;
 
     return query;
   },
