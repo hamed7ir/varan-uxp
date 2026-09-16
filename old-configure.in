@@ -3323,7 +3323,23 @@ if test -n "$MOZ_FFVPX" -a -n "$COMPILE_ENVIRONMENT"; then
   dnl The .S are assembled by media/ffvpx/ffvpx-asm-wrap.sh, a scoped AS override
   dnl in each arm dir's Makefile.in, because autoconf.mk sets AS to a no-op here.
   WINNT:arm)
-    FFVPX_ASFLAGS="-DWIN32"
+    dnl Varan v1.1 FIX (build 1 failed here): XP_WIN is LOAD-BEARING, not decoration.
+    dnl media/ffvpx/config.h:9 routes on `#if defined(XP_WIN)` and only then tests
+    dnl _M_ARM (:17) to reach config_win32_arm.h. With -DWIN32 alone, NO ffvpx config
+    dnl header is included when assembling, and that ONE miss produced BOTH failures:
+    dnl   (a) EXTERN_ASM (defined empty at config_win32_arm.h:17) stayed undefined and
+    dnl       was pasted literally -- objects defined EXTERN_ASMff_vector_fmul_neon
+    dnl       instead of ff_vector_fmul_neon (12 undefined symbols in mozavutil.dll).
+    dnl   (b) CONFIG_THUMB (1 at config_win32_arm.h:582) was 0, so libavutil/arm/asm.S
+    dnl       :29-35 left the `A` (A32) lines ACTIVE and commented out the `T` (Thumb)
+    dnl       lines. ffmpeg emitted its A32 branch; the thumbv7 triple rejected it.
+    dnl MEASURED 2026-09-16 with a control that fired: without -DXP_WIN, 2 of 3 probe
+    dnl files fail to assemble and the third emits 8 EXTERN_ASM* / 0 ff_* symbols; with
+    dnl it, 11 of 11 assemble, 0 EXTERN_ASM*, all ARMNT 0x1C4, and the R4 object dialect
+    dnl gate decodes 21,277 instructions with ZERO undecodable as Thumb (the same object
+    dnl decoded as A32 gives 1,061 undecodable, so the gate discriminates).
+    dnl -DWIN32 is kept: ffmpeg compat headers key off it independently of XP_WIN.
+    FFVPX_ASFLAGS="-DWIN32 -DXP_WIN"
   ;;
   *:x86_64)
     if $CC -E -dM -</dev/null | grep -q __ELF__; then

@@ -69,6 +69,39 @@ elif CONFIG['CPU_ARCH'] == 'arm':
                             and 'dotprod' not in f.lower()
                             and 'i8mm' not in f.lower()]
 
+        # Varan v1.1 FIX (build 1 failed to link gkmedias.dll with 24 undefined vpx_*).
+        #
+        # ARM_SOURCES is a STATIC list generated for a HAVE_NEON_ASM=1 config. Dropping
+        # the .asm above is correct under R4, but it leaves the list internally
+        # inconsistent with our vpx_config.h (HAVE_NEON 1 / HAVE_NEON_ASM 0):
+        #   - it still ships the ASM-FLAVOUR SHIM vpx_convolve8_neon_asm.c, whose eight
+        #     *_filter_type*_neon symbols exist ONLY in A32 .asm -- there is no C
+        #     definition of them anywhere in the tree, so they can never resolve here;
+        #   - and it OMITS the pure-intrinsics .c twins that a HAVE_NEON_ASM=0 build needs.
+        #
+        # NOTE the reported count was 20; the true count is 24. lld stops at 20 by
+        # default (build-v11.log: 'too many errors emitted'). Never treat an lld error
+        # list as complete without /errorlimit:0 or an nm sweep.
+        #
+        # The ADD set below is NOT hand-guessed: it was derived from the unresolved
+        # symbols, and it then turned out to match upstream's own HAVE_NEON_ASM=0 list
+        # exactly -- every one of these six is in AARCH64_SOURCES, and the shim is not.
+        #
+        # DO NOT flip HAVE_NEON_ASM back to 1 without restoring the .asm: 
+        # vpx_dsp/arm/intrapred_neon.c:1571-1942 is wrapped in `#if !HAVE_NEON_ASM` and
+        # silently supplies all 12 vpx_{h,v,tm}_predictor_*_neon. That is why those
+        # never appeared as unresolved.
+        arm_asm_files = [f for f in arm_asm_files
+                         if not f.endswith('vpx_dsp/arm/vpx_convolve8_neon_asm.c')]
+        arm_asm_files += [
+            'libvpx/vpx_dsp/arm/idct4x4_1_add_neon.c',
+            'libvpx/vpx_dsp/arm/idct4x4_add_neon.c',
+            'libvpx/vpx_dsp/arm/loopfilter_neon.c',
+            'libvpx/vpx_dsp/arm/vpx_convolve8_neon.c',
+            'libvpx/vpx_dsp/arm/vpx_convolve_avg_neon.c',
+            'libvpx/vpx_dsp/arm/vpx_convolve_copy_neon.c',
+        ]
+
     if CONFIG['VPX_AS_CONVERSION']:
         SOURCES += sorted([
             "!%s.S" % f if f.endswith('.asm') else f for f in arm_asm_files
