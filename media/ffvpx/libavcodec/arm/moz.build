@@ -4,14 +4,16 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 SOURCES += [
-    # Varan v1.1: no-op ff_h264_pred_init_arm / ff_videodsp_init_arm. See the file's
-    # header for why these are stubbed rather than vendored (they are dispatchers;
-    # neither touches VP9, which is what this release targets).
-    'varan_arm_init_stubs.c',
     'flacdsp_arm.S',
     'flacdsp_init_arm.c',
     'mpegaudiodsp_fixed_armv6.S',
     'mpegaudiodsp_init_arm.c',
+    # Varan v1.1: no-op ff_h264_pred_init_arm / ff_videodsp_init_arm. See the file's
+    # header for why these are stubbed rather than vendored (they are dispatchers;
+    # neither touches VP9, which is what this release targets).
+    # NB moz.build SOURCES must stay SORTED -- mozbuild raises UnsortedError otherwise,
+    # which is how the first attempt at this edit failed. 'v' sorts after 'm'.
+    'varan_arm_init_stubs.c',
 ]
 
 # Varan v1.1: VP8/VP9 ARM NEON, vendored from FFmpeg n6.1 (matches this tree's
