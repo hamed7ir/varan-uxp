@@ -35,7 +35,11 @@ Not a recompile. The substantive work, roughly in order of difficulty:
   `thumbv7-windows-msvc` defects, several device-lethal, worked around per-site
   and in one case by a link-time COMDAT override. They are catalogued in the
   build tree; two of them corrupt argument registers or clear the Thumb bit on
-  function pointers, which is why this port carries post-link fixups and gates.
+  function pointers. Both are now fixed in the compiler and linker themselves --
+  one upstream in clang 23, the other by the Varan lld patch in
+  [llvm-rt](https://github.com/hamed7ir/llvm-rt) -- so the released binaries need
+  no post-link fixups at all. On an older or unpatched clang the post-link passes
+  are still required; see varan's README, section 1b.
 - **js-ctypes / libffi.** Vendored libffi 3.4.6 for its Microsoft-contributed
   Windows-ARM32 MSVC-ABI backend. Without ctypes, `OS.File` never loads and
   Places, search, session store and the address bar are all dead.
