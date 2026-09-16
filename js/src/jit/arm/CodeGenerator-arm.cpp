@@ -28,6 +28,7 @@
 using namespace js;
 using namespace js::jit;
 
+using mozilla::Abs;
 using mozilla::FloorLog2;
 using mozilla::NegativeInfinity;
 using JS::GenericNaN;
@@ -682,6 +683,116 @@ CodeGeneratorARM::visitDivPowTwoI(LDivPowTwoI* ins)
 
     // Do the shift.
     masm.as_mov(output, asr(scratch, shift));
+}
+
+void
+CodeGeneratorARM::visitDivOrModConstantI(LDivOrModConstantI* ins)
+{
+    Register lhs    = ToRegister(ins->numerator());
+    Register output = ToRegister(ins->output());
+    Register temp   = ToRegister(ins->getTemp(0));
+    int32_t  d      = ins->denominator();
+
+    // useRegister() (not AtStart) keeps the numerator live past the definition,
+    // and the temp covers the same range, so the allocator gives three DISTINCT
+    // registers. The sequence reads lhs at the very end (steps 5/7/8), so this
+    // is load-bearing, not decoration.
+    MOZ_ASSERT(lhs != output);
+    MOZ_ASSERT(lhs != temp);
+    MOZ_ASSERT(output != temp);
+
+    // d == 0 goes to the generic path; |d| a power of two is claimed by
+    // LDivPowTwoI / LModPowTwoI. computeDivisionConstants asserts both of these
+    // itself (CodeGenerator-shared.cpp:1667-1669), so getting here with either
+    // would be an assert, not a wrong answer.
+    MOZ_ASSERT(d != 0);
+    MOZ_ASSERT((Abs(d) & (Abs(d) - 1)) != 0);
+
+    bool isDiv = ins->mir()->isDiv();
+
+    // Divide by Abs(d) and negate afterwards if d is negative.
+    ReciprocalMulConstants rmc = computeDivisionConstants(Abs(d), /* maxLog = */ 31);
+
+    // 1. Materialise the 32-bit magic constant. HasMOVWT() is true on this
+    //    ARMv7 target, so ma_mov emits movw(+movt) and needs no scratch.
+    //    The int32_t truncation is deliberate: M can exceed INT32_MAX and the
+    //    high bit is restored by step 3.
+    masm.ma_mov(Imm32(int32_t(rmc.multiplier)), temp);
+
+    // 2. Multiply-high. as_smull is (destHI, destLO, src1, src2) -- HIGH FIRST
+    //    (declared Assembler-arm.h:1718 as dest1/dest2, DEFINED
+    //    Assembler-arm.cpp:2907 as destHI/destLO). We want the high half.
+    //    RdLo = temp is discarded; it may alias Rm because both sources are
+    //    read before either destination is written.
+    masm.as_smull(output, temp, lhs, temp);
+
+    // 3. Correct for M > INT32_MAX. We computed ((int32_t)M * n) >> 32 but want
+    //    (M * n) >> 32, and (int32_t)M == M - 2^32, so they differ by exactly n.
+    //    Cannot overflow: (int32_t)M is negative, so output and n differ in sign.
+    //    ma_add(src1, dest) is dest = dest + src1.
+    if (rmc.multiplier > INT32_MAX) {
+        MOZ_ASSERT(rmc.multiplier < (int64_t(1) << 32));
+        masm.ma_add(lhs, output);
+    }
+
+    // 4. Arithmetic shift. THE GUARD IS MANDATORY, NOT DEFENSIVE: x86 can write
+    //    an unconditional sarl because SAR by 0 is a no-op there, but jit::asr
+    //    asserts 1 <= amt <= 32 (Assembler-arm.cpp:1493) and an immediate 0
+    //    encodes ASR #32, not ASR #0. shiftAmount == 0 is COMMON -- divisors 3
+    //    and 6 both produce it, and both are in the oracle.
+    if (rmc.shiftAmount > 0)
+        masm.as_mov(output, asr(output, rmc.shiftAmount));
+
+    // 5. Sign-correct a negative numerator. (M*n) >> (32+s) is floor(n/d) for
+    //    n >= 0 but ceil(n/d) - 1 for n < 0; subtracting (n >> 31), which is -1
+    //    exactly when n < 0, adds the missing 1. ARM folds the shift into the
+    //    subtract, so this is ONE instruction where x86 needs three.
+    if (ins->canBeNegativeDividend())
+        masm.as_sub(output, output, asr(lhs, 31));
+
+    // output now holds n / Abs(d), truncated toward zero.
+
+    // 6. Negate when d < 0. No overflow check is needed: |d| >= 2 here (|d| == 1
+    //    is a power of two and never reaches this visitor), so |q| <= 2^30.
+    if (d < 0)
+        masm.ma_neg(output, output);
+
+    // 7. Modulo form: r = n - q*d, via MLS (dest = acc - src1*src2).
+    //    temp still holds the discarded SMULL low half and is free.
+    if (!isDiv) {
+        masm.ma_mov(Imm32(d), temp);
+        masm.as_mls(output, lhs, output, temp);
+    }
+
+    // 8. Fallible paths. Reachable only when the result is NOT truncated, i.e.
+    //    the JS expression can observe a double or a -0.
+    if (!ins->mir()->isTruncated()) {
+        if (isDiv) {
+            // An inexact division must produce a double: multiply back and
+            // require equality. q*d cannot overflow since |d| > 1.
+            masm.ma_mov(Imm32(d), temp);
+            masm.as_mul(temp, output, temp);
+            masm.ma_cmp(lhs, temp);
+            bailoutIf(Assembler::NotEqual, ins->snapshot());
+
+            // 0 / negative is -0, which is not an int32.
+            if (d < 0) {
+                masm.as_cmp(lhs, Imm8(0));
+                bailoutIf(Assembler::Zero, ins->snapshot());
+            }
+        } else if (ins->canBeNegativeDividend()) {
+            // A zero remainder from a negative dividend is -0.
+            Label done;
+
+            masm.as_cmp(lhs, Imm8(0));
+            masm.ma_b(&done, Assembler::GreaterThanOrEqual);
+
+            masm.as_cmp(output, Imm8(0));
+            bailoutIf(Assembler::Zero, ins->snapshot());
+
+            masm.bind(&done);
+        }
+    }
 }
 
 void

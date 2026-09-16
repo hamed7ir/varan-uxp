@@ -26,6 +26,7 @@
     _(WasmUnalignedStore)          \
     _(WasmUnalignedLoadI64)        \
     _(WasmUnalignedStoreI64)       \
-    _(Int64ToFloatingPointCall)
+    _(Int64ToFloatingPointCall)    \
+    _(DivOrModConstantI)
 
 #endif /* jit_arm_LOpcodes_arm_h */

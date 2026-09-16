@@ -122,6 +122,7 @@ class CodeGeneratorARM : public CodeGeneratorShared
     virtual void visitDivI(LDivI* ins);
     virtual void visitSoftDivI(LSoftDivI* ins);
     virtual void visitDivPowTwoI(LDivPowTwoI* ins);
+    virtual void visitDivOrModConstantI(LDivOrModConstantI* ins);
     virtual void visitModI(LModI* ins);
     virtual void visitSoftModI(LSoftModI* ins);
     virtual void visitModPowTwoI(LModPowTwoI* ins);

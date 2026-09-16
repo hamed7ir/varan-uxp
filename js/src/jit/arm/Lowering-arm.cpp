@@ -14,6 +14,7 @@
 using namespace js;
 using namespace js::jit;
 
+using mozilla::Abs;
 using mozilla::FloorLog2;
 
 LBoxAllocation
@@ -340,6 +341,24 @@ LIRGeneratorARM::lowerDivI(MDiv* div)
             define(lir, div);
             return;
         }
+
+        // Varan v1.1 (J1): the reciprocal-multiplication case the comment above
+        // describes as "also possible" but which upstream never implemented for
+        // ARM. Adopted from x86 (LDivOrModConstantI), and worth MORE here: with
+        // no HWCAP_IDIVA and no VARAN_THUMB2 encoding for as_sdiv, the path this
+        // replaces is a full ABI call to __aeabi_idivmod, not a slow instruction.
+        //
+        // Strictly AFTER the power-of-two branch, and it additionally excludes
+        // every |rhs| that is a power of two, so no divisor that an existing
+        // fast path claims can be diverted here.
+        if (rhs != 0 && (Abs(rhs) & (Abs(rhs) - 1)) != 0) {
+            LDivOrModConstantI* lir =
+                new(alloc()) LDivOrModConstantI(useRegister(div->lhs()), rhs, temp());
+            if (div->fallible())
+                assignSnapshot(lir, Bailout_DoubleOutput);
+            define(lir, div);
+            return;
+        }
     }
 
     if (HasIDIV()) {
@@ -387,6 +406,18 @@ LIRGeneratorARM::lowerModI(MMod* mod)
         if (shift < 31 && (1 << (shift+1)) - 1 == rhs) {
             MOZ_ASSERT(rhs);
             LModMaskI* lir = new(alloc()) LModMaskI(useRegister(mod->lhs()), temp(), temp(), shift+1);
+            if (mod->fallible())
+                assignSnapshot(lir, Bailout_DoubleOutput);
+            define(lir, mod);
+            return;
+        }
+
+        // Varan v1.1 (J1). STRICTLY AFTER LModMaskI: x % (2^k - 1) keeps the
+        // mask-and-fold path, which this backend has and x86 does NOT -- this
+        // adoption must not regress a place where we are already ahead.
+        if (rhs != 0 && (Abs(rhs) & (Abs(rhs) - 1)) != 0) {
+            LDivOrModConstantI* lir =
+                new(alloc()) LDivOrModConstantI(useRegister(mod->lhs()), rhs, temp());
             if (mod->fallible())
                 assignSnapshot(lir, Bailout_DoubleOutput);
             define(lir, mod);

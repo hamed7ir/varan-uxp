@@ -245,6 +245,48 @@ class LDivPowTwoI : public LInstructionHelper<1, 1, 0>
     }
 };
 
+// Signed division or modulo by a constant whose absolute value is NOT a power
+// of two. Computed by reciprocal multiplication (Hacker's Delight 10-2..10-8)
+// instead of a call to __aeabi_idivmod.
+//
+// WHY THIS MATTERS MORE HERE THAN ON x86, where this optimization comes from:
+// Architecture-arm.cpp's hardcoded Tegra 3 profile omits HWCAP_IDIVA (Cortex-A9
+// genuinely has no sdiv/udiv), AND as_sdiv/as_udiv have no VARAN_THUMB2 arm at
+// all -- they fall through to writeInst, which diverts to a UDF on this port.
+// So the alternative is not a slow instruction, it is a full ABI call.
+//
+// The MIR node decides which answer is produced: MDiv -> quotient, MMod -> remainder.
+class LDivOrModConstantI : public LInstructionHelper<1, 1, 1>
+{
+    const int32_t denominator_;
+
+  public:
+    LIR_HEADER(DivOrModConstantI)
+
+    LDivOrModConstantI(const LAllocation& lhs, int32_t denominator, const LDefinition& temp)
+      : denominator_(denominator)
+    {
+        setOperand(0, lhs);
+        setTemp(0, temp);
+    }
+
+    const LAllocation* numerator() {
+        return getOperand(0);
+    }
+    int32_t denominator() const {
+        return denominator_;
+    }
+    MBinaryArithInstruction* mir() const {
+        MOZ_ASSERT(mir_->isDiv() || mir_->isMod());
+        return static_cast<MBinaryArithInstruction*>(mir_);
+    }
+    bool canBeNegativeDividend() const {
+        if (mir_->isMod())
+            return mir_->toMod()->canBeNegativeDividend();
+        return mir_->toDiv()->canBeNegativeDividend();
+    }
+};
+
 class LModI : public LBinaryMath<1>
 {
   public:
