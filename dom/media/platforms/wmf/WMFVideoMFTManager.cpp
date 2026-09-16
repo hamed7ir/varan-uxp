@@ -518,6 +518,41 @@ WMFVideoMFTManager::InitInternal(bool aForceD3D9)
 
   mDecoder = decoder;
   hr = SetDecoderMediaTypes();
+  if (FAILED(hr) && mUseHwAccel) {
+    // Varan v1.1: fall back to software when DXVA media-type negotiation fails.
+    //
+    // THE BUG THIS FIXES. Reaching here with mUseHwAccel means the MFT reported
+    // MF_SA_D3D_AWARE and accepted MFT_MESSAGE_SET_D3D_MANAGER -- i.e. the driver DOES
+    // expose a DXVA decoder device -- but then refused the hardware output type.
+    // SetDecoderMediaTypes picks NV12 when mUseHwAccel and YV12 otherwise (the only
+    // behavioural fork in it), so this is a negotiation failure, not a capability one.
+    //
+    // Every OTHER DXVA failure in this file degrades to the software path: the
+    // InitializeDXVA early-outs all leave mUseHwAccel false, and ConfigureVideoFrameGeometry
+    // has an explicit mDXVAEnabled=false + re-Init recovery. This ONE site had none, and
+    // because H.264 has no second decoder module (PDMFactory registers WMF, then ffvpx and
+    // Agnostic, neither of which offers H.264) the failure lost the CODEC ENTIRELY rather
+    // than just the acceleration. That is why setting
+    // media.hardware-video-decoding.force-enabled=true was device-observed to DESTROY
+    // H.264 playback instead of merely not accelerating it.
+    //
+    // DO NOT retry in place: MFTDecoder::SetMediaTypes has already called SetInputType and
+    // may have sent NOTIFY_BEGIN_STREAMING, so the MFT is half-configured. Re-enter from
+    // scratch with a fresh decoder, exactly as ConfigureVideoFrameGeometry does.
+    //
+    // TERMINATION IS STRUCTURAL, not a counter: mDXVAEnabled=false makes InitializeDXVA
+    // return at its FIRST statement (before its MOZ_ASSERT(!mDXVA2Manager)), so useDxva is
+    // false, mUseHwAccel stays false, and this branch cannot be taken on the second pass.
+    //
+    // WORST CASE IS EXACTLY TODAY'S BEHAVIOUR: without this, the decoder was lost here
+    // anyway. It can only improve or no-op.
+    mDXVAFailureReason = nsPrintfCString(
+      "DXVA media type negotiation failed with code %X; retrying in software", hr);
+    mDecoder = nullptr;
+    DeleteOnMainThread(mDXVA2Manager);
+    mDXVAEnabled = false;
+    return InitInternal(aForceD3D9);
+  }
   NS_ENSURE_TRUE(SUCCEEDED(hr), false);
 
   LOG("Video Decoder initialized, Using DXVA: %s", (mUseHwAccel ? "Yes" : "No"));
