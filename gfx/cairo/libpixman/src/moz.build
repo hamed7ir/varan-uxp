@@ -12,7 +12,19 @@ EXPORTS += [
 # the standard GNU assembler, so use the C fallback paths for now.
 # This may be fixable if clang's ARM/iOS assembler improves into a
 # viable solution in the future.
-if CONFIG['OS_ARCH'] != 'Darwin' and CONFIG['GNU_CC']:
+# Varan (v1.1 B8): explicit Windows-ARM exclusion, belt-and-braces.
+# These four .S are A32 (`.syntax divided` / ARM-mode bodies) and A32 is
+# DEVICE-LETHAL on Windows RT 8.1 -- the OS drops CPSR.T across preemption, so
+# an A32 stub passes every build check and then faults 0xC000001D intermittently
+# on the device (see R4 / THUMB-2-ONLY in .claude/CLAUDE.md).
+# They are already excluded here because GNU_CC is empty for clang-cl, but that
+# is INCIDENTAL: the surrounding condition is about Apple's assembler, says
+# nothing about RT, and HAVE_ARM_SIMD is genuinely 1 on this target (FACT,
+# obj-browser-arm32-rt2/config/autoconf.mk). So a single stray GNU_CC would
+# admit all four silently. A device-lethal condition must not depend on one
+# variable nobody is watching -- name the real reason in the gate.
+if CONFIG['OS_ARCH'] != 'Darwin' and CONFIG['GNU_CC'] and not (
+        CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] == 'WINNT'):
     if CONFIG['HAVE_ARM_NEON']:
         SOURCES += [
             'pixman-arm-neon-asm-bilinear.S',
