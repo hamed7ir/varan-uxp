@@ -17,32 +17,10 @@
 #include "nsProxyRelease.h"
 #include "nsThreadUtils.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include "prtime.h"
-
 namespace mozilla {
 namespace dom {
 
 #define DOM_STORAGE_CACHE_KEEP_ALIVE_TIME_MS 20000
-
-// Varan: env-gated page-load event log (VARAN_JITLOG=<file path>), shared
-// format with js/src/vm/VaranJitLog.h. Diagnostic instrument for the Q1/Q2
-// blocked-time attribution run; remove after that run.
-static FILE*
-VaranJitLogFile()
-{
-  static FILE* sFile = nullptr;
-  static bool sChecked = false;
-  if (!sChecked) {
-    sChecked = true;
-    const char* path = getenv("VARAN_JITLOG");
-    if (path && *path) {
-      sFile = fopen(path, "a");
-    }
-  }
-  return sFile;
-}
 
 // static
 DOMStorageDBBridge* DOMStorageCache::sDatabase = nullptr;
@@ -334,22 +312,7 @@ DOMStorageCache::WaitForPreload()
   // No need to check sDatabase for being non-null since preload is either
   // done before we've shut the DB down or when the DB could not start,
   // preload has not even be started.
-
-  // Varan: Q2 attribution -- this synchronous wait blocks the main thread on
-  // the storage DB thread's disk read; on eMMC it is a candidate for the
-  // multi-second single events. VARAN_JITLOG-gated.
-  PRTime varanT0 = VaranJitLogFile() ? PR_Now() : 0;
-
   sDatabase->SyncPreload(this);
-
-  if (FILE* varanLog = VaranJitLogFile()) {
-    double ms = double(PR_Now() - varanT0) / 1000.0;
-    if (ms >= 50.0) {
-      fprintf(varanLog, "LS-PRELOAD t=%lld ms=%.1f origin=%s\n",
-              (long long)(varanT0 / 1000), ms, mOriginNoSuffix.get());
-      fflush(varanLog);
-    }
-  }
 }
 
 nsresult

@@ -15,48 +15,7 @@
 #include "mozilla/dom/PerformanceNavigation.h"
 #include "mozilla/TimeStamp.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-
 using namespace mozilla;
-
-// Varan: NAV phase stamps (POST-FABLE item 4) -- partition the in-page probe's gap list into
-// load vs playback phases. Same VARAN_JITLOG gate + epoch-ms clock as the other nine tags
-// (js/src/vm/VaranJitLog.h format family); DIAGNOSTIC, remove with the MANIFEST DIAGNOSTIC
-// series. One nsDOMNavigationTiming exists per docshell, so lines fire for the top document,
-// every iframe, AND chrome documents -- obj= (the timing instance) and uri= are the fields
-// post-processing uses to pick out the watch page's own lines.
-static FILE*
-VaranJitLogFile()
-{
-  static FILE* sFile = nullptr;
-  static bool sChecked = false;
-  if (!sChecked) {
-    sChecked = true;
-    const char* path = getenv("VARAN_JITLOG");
-    if (path && *path) {
-      sFile = fopen(path, "a");
-    }
-  }
-  return sFile;
-}
-
-static void
-VaranNavLog(const char* aEvent, const void* aSelf, nsIURI* aURI)
-{
-  FILE* f = VaranJitLogFile();
-  if (!f) {
-    return;
-  }
-  nsAutoCString spec;
-  if (aURI) {
-    aURI->GetSpec(spec);
-  }
-  fprintf(f, "NAV t=%lld event=%s obj=%p uri=%s\n",
-          (long long)(PR_Now() / PR_USEC_PER_MSEC), aEvent, aSelf,
-          spec.IsEmpty() ? "?" : spec.get());
-  fflush(f);
-}
 
 nsDOMNavigationTiming::nsDOMNavigationTiming()
 {
@@ -103,7 +62,6 @@ nsDOMNavigationTiming::NotifyNavigationStart(DocShellState aDocShellState)
   mNavigationStartHighRes = (double)PR_Now() / PR_USEC_PER_MSEC;
   mNavigationStart = TimeStamp::Now();
   mDocShellHasBeenActiveSinceNavigationStart = (aDocShellState == DocShellState::eActive);
-  VaranNavLog("navigationStart", this, mLoadedURI);   // Varan NAV (uri usually still unknown here)
 }
 
 void
@@ -113,7 +71,6 @@ nsDOMNavigationTiming::NotifyFetchStart(nsIURI* aURI, Type aNavigationType)
   // At the unload event time we don't really know the loading uri.
   // Need it for later check for unload timing access.
   mLoadedURI = aURI;
-  VaranNavLog("fetchStart", this, aURI);   // Varan NAV: binds obj= to its URI earliest
 }
 
 void
@@ -148,7 +105,6 @@ nsDOMNavigationTiming::NotifyLoadEventStart()
     return;
   }
   mLoadEventStart = TimeStamp::Now();
-  VaranNavLog("loadEventStart", this, mLoadedURI);   // Varan NAV
 }
 
 void
@@ -158,7 +114,6 @@ nsDOMNavigationTiming::NotifyLoadEventEnd()
     return;
   }
   mLoadEventEnd = TimeStamp::Now();
-  VaranNavLog("loadEventEnd", this, mLoadedURI);   // Varan NAV
 }
 
 void
@@ -189,7 +144,6 @@ nsDOMNavigationTiming::NotifyDOMInteractive(nsIURI* aURI)
   }
   mLoadedURI = aURI;
   mDOMInteractive = TimeStamp::Now();
-  VaranNavLog("domInteractive", this, aURI);   // Varan NAV
 }
 
 void
@@ -208,10 +162,9 @@ nsDOMNavigationTiming::NotifyDOMContentLoadedStart(nsIURI* aURI)
   if (!mDOMContentLoadedEventStart.IsNull()) {
     return;
   }
-
+ 
   mLoadedURI = aURI;
   mDOMContentLoadedEventStart = TimeStamp::Now();
-  VaranNavLog("DCLstart", this, aURI);   // Varan NAV
 }
 
 void
@@ -220,10 +173,9 @@ nsDOMNavigationTiming::NotifyDOMContentLoadedEnd(nsIURI* aURI)
   if (!mDOMContentLoadedEventEnd.IsNull()) {
     return;
   }
-
+ 
   mLoadedURI = aURI;
   mDOMContentLoadedEventEnd = TimeStamp::Now();
-  VaranNavLog("DCLend", this, aURI);   // Varan NAV
 }
 
 void

@@ -25,7 +25,6 @@
 #include "vm/RegExpStatics.h"
 #include "vm/StringBuffer.h"
 #include "vm/TraceLogging.h"
-#include "vm/VaranJitLog.h"
 #ifdef DEBUG
 #include "vm/Unicode.h"
 #endif
@@ -1156,12 +1155,6 @@ RegExpShared::execute(JSContext* cx, MutableHandleRegExpShared re, HandleLinearS
     MOZ_ASSERT_IF(matches, !endIndex);
     MOZ_ASSERT_IF(!matches, endIndex);
     TraceLoggerThread* logger = TraceLoggerForMainThread(cx->runtime());
-
-    // Varan: Q2 attribution -- one regex execution (including its
-    // point-of-use compile) is the only enumerated candidate whose single
-    // cost is unbounded. Logs "RE ... a=<source len> b=<input len>" when
-    // it takes >= 100 ms. VARAN_JITLOG-gated.
-    VaranJitLogScope varanLog("RE", 100.0, re->source->length(), input->length());
 
     CompilationMode mode = matches ? Normal : MatchOnly;
 

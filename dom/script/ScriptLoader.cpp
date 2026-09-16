@@ -59,32 +59,10 @@
 #include "mozilla/Unused.h"
 #include "nsIScriptError.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include "prtime.h"
-
 using JS::SourceBufferHolder;
 
 namespace mozilla {
 namespace dom {
-
-// Varan: env-gated page-load event log (VARAN_JITLOG=<file path>), shared
-// format with js/src/vm/VaranJitLog.h. Diagnostic instrument for the Q1/Q2
-// blocked-time attribution run; remove after that run.
-static FILE*
-VaranJitLogFile()
-{
-  static FILE* sFile = nullptr;
-  static bool sChecked = false;
-  if (!sChecked) {
-    sChecked = true;
-    const char* path = getenv("VARAN_JITLOG");
-    if (path && *path) {
-      sFile = fopen(path, "a");
-    }
-  }
-  return sFile;
-}
 
 void
 ImplCycleCollectionUnlink(ScriptLoadRequestList& aField);
@@ -2408,15 +2386,6 @@ ScriptLoader::EvaluateScript(ScriptLoadRequest* aRequest)
       if (NS_SUCCEEDED(rv)) {
         {
           nsJSUtils::ExecutionContext exec(cx, global);
-
-          // Varan: Q2 attribution -- bracket each classic-script compile and
-          // top-level execution with its URL. This timestamps the giant JS
-          // entries and catches any synchronous main-thread full compile of a
-          // large external script (off-thread compiles show omt=1 with a
-          // small compile_ms = the JoinCompile merge). VARAN_JITLOG-gated.
-          bool varanOmt = !!aRequest->mOffThreadToken;
-          PRTime varanT0 = VaranJitLogFile() ? PR_Now() : 0;
-
           if (aRequest->mOffThreadToken) {
             rv = exec.JoinCompile(&aRequest->mOffThreadToken);
           } else {
@@ -2424,9 +2393,6 @@ ScriptLoader::EvaluateScript(ScriptLoadRequest* aRequest)
             SourceBufferHolder srcBuf = GetScriptSource(aRequest, inlineData);
             rv = exec.Compile(options, srcBuf);
           }
-
-          PRTime varanT1 = VaranJitLogFile() ? PR_Now() : 0;
-
           if (rv == NS_OK) {
              JS::Rooted<JSScript*> script(cx, exec.GetScript());
              if (script) {
@@ -2438,21 +2404,6 @@ ScriptLoader::EvaluateScript(ScriptLoadRequest* aRequest)
              }
 
              rv = exec.ExecScript();
-          }
-
-          if (FILE* varanLog = VaranJitLogFile()) {
-            nsAutoCString varanSpec;
-            if (aRequest->mURI) {
-              aRequest->mURI->GetSpec(varanSpec);
-            } else {
-              varanSpec.AssignLiteral("(inline)");
-            }
-            fprintf(varanLog, "SCRIPT t=%lld compile_ms=%.1f exec_ms=%.1f omt=%d url=%s\n",
-                    (long long)(varanT0 / 1000),
-                    double(varanT1 - varanT0) / 1000.0,
-                    double(PR_Now() - varanT1) / 1000.0,
-                    varanOmt ? 1 : 0, varanSpec.get());
-            fflush(varanLog);
           }
         }
       }

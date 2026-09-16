@@ -23,7 +23,6 @@
 #include "vm/Interpreter.h"
 #include "vm/JSONParser.h"
 #include "vm/StringBuffer.h"
-#include "vm/VaranJitLog.h"
 
 #include "jsatominlines.h"
 #include "jsboolinlines.h"
@@ -939,11 +938,6 @@ bool
 js::ParseJSONWithReviver(JSContext* cx, const mozilla::Range<const CharT> chars, HandleValue reviver,
                          MutableHandleValue vp)
 {
-    // Varan: Q2 attribution -- a multi-MB main-thread JSON.parse (ytInitialData,
-    // innertube responses). Logs "JSON ... a=<chars>" when >= 50 ms.
-    // VARAN_JITLOG-gated.
-    VaranJitLogScope varanLog("JSON", 50.0, chars.length(), 0);
-
     /* 15.12.2 steps 2-3. */
     Rooted<JSONParser<CharT>> parser(cx, JSONParser<CharT>(cx, chars));
     if (!parser.parse(vp))
