@@ -349,7 +349,19 @@
 #define HAVE_RSYNC_CONTIMEOUT 1
 #define HAVE_SYMVER_ASM_LABEL 0
 #define HAVE_SYMVER_GNU_ASM 0
-#define HAVE_VFP_ARGS 0
+/* Varan v1.1 FIX: this target is AAPCS-VFP HARD-FLOAT -- clang-cl for
+ * thumbv7-unknown-windows-msvc predefines __ARM_PCS_VFP 1 (and _M_ARM_FP 31).
+ * libavutil/arm/asm.S:356-363 keys the VFP/NOVFP line prefixes off this macro, and
+ * with it 0 the SOFT-FLOAT-ARGS branch was live. In e.g. float_dsp_neon.S:112-116
+ *     VFP    len .req r2   /  VFP    vdup.32 q8, d0[0]
+ *     NOVFP  len .req r3   /  NOVFP  vdup.32 q8, r2
+ * against the C prototype (float *dst, const float *src, float mul, int len), a
+ * hard-float caller passes mul in s0 and len in r2. The NOVFP body would therefore
+ * have taken the MULTIPLIER from r2 (which holds len) and the LOOP COUNT from r3
+ * (undefined) -- wrong results AND an out-of-bounds write, with no crash to warn us.
+ * This was inert before v1.1 only because ARCH_ARM/HAVE_NEON/CONFIG_THUMB were all 0
+ * and no ARM assembly was ever built; B9 turned the assembly on and made it live. */
+#define HAVE_VFP_ARGS 1
 #define HAVE_XFORM_ASM 0
 #define HAVE_XMM_CLOBBERS 0
 #define HAVE_KCMVIDEOCODECTYPE_HEVC 0
