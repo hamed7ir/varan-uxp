@@ -352,6 +352,34 @@ PDMFactory::CreatePDMs()
     mWMFFailedToLoad = MediaPrefs::DecoderDoctorWMFDisabledIsFailure();
   }
 #endif
+#if defined(_M_ARM)
+  // Varan v1.1: on ARM32, register the Agnostic module BEFORE ffvpx so VP8/VP9 are
+  // decoded by libvpx (which now has NEON) instead of ffvpx (which does not).
+  //
+  // WHY. media/ffvpx/config_win32_arm.h sets ARCH_ARM 0 -- not merely HAVE_NEON 0, the
+  // entire architecture switch -- and media/ffvpx/libavcodec/arm/moz.build builds four
+  // files, all FLAC and MP3. ffvpx therefore has ZERO ARM video assembly and decodes VP9
+  // with architecture-blind scalar C. Device-measured: 2625 dropped of 4612 frames (57%)
+  // at 854x480. libvpx ships NEON intrinsics for the same work, enabled for Windows-ARM
+  // in the preceding commit (204/204 of its ARM sources compile clean).
+  //
+  // WHY THIS AND NOT media.ffvpx.enabled=false, the obvious lever: ffvpx is this build's
+  // ONLY FLAC decoder (config_win32_arm.h:682 CONFIG_FLAC_DECODER 1; there is no other
+  // FLAC decoder anywhere under dom/media/platforms/). Disabling the module wholesale
+  // would trade a VP9 speedup for silently losing FLAC.
+  //
+  // WHY REORDERING IS SAFE, AND SCOPED TO EXACTLY ONE CODEC FAMILY: the two modules'
+  // claimed types overlap ONLY on VP8/VP9.
+  //   AgnosticDecoderModule::SupportsMimeType  VPX, Opus, Vorbis, Wave, Theora (+AV1 if
+  //                                            MOZ_AV1 and the pref are on)
+  //   ffvpx (config_win32_arm.h:680-683)       VP8, VP9, FLAC, MP3
+  // Opus/Vorbis/Wave/Theora already fell through to Agnostic because ffvpx never claimed
+  // them, so their routing is unchanged. FLAC and MP3 still fall through to ffvpx below
+  // because Agnostic does not claim them. H.264 and AAC are unaffected: WMFDecoderModule
+  // is registered above this and already claims them.
+  m = new AgnosticDecoderModule();
+  StartupPDM(m);
+#endif
 #ifdef MOZ_FFVPX
   if (MediaPrefs::PDMFFVPXEnabled()) {
     m = FFVPXRuntimeLinker::CreateDecoderModule();
@@ -371,8 +399,14 @@ PDMFactory::CreatePDMs()
   StartupPDM(m);
 #endif
 
+#if !defined(_M_ARM)
+  // Varan v1.1: on ARM32 this module is registered EARLIER, above ffvpx, so that
+  // VP8/VP9 reach libvpx rather than ffvpx's scalar C. Registering it here as well
+  // would be harmless (GetDecoder takes the first match) but would allocate a second
+  // module that can never be reached, so the ARM path skips it here.
   m = new AgnosticDecoderModule();
   StartupPDM(m);
+#endif
 
 #ifdef MOZ_GMP
   if (MediaPrefs::PDMGMPEnabled()) {
