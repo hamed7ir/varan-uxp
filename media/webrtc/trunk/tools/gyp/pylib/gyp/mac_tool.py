@@ -88,18 +88,11 @@ class MacTool(object):
 
     if os.environ['XCODE_VERSION_ACTUAL'] > '0700':
       args.extend(['--auto-activate-custom-fonts'])
-      if 'IPHONEOS_DEPLOYMENT_TARGET' in os.environ:
-        args.extend([
-            '--target-device', 'iphone', '--target-device', 'ipad',
-            '--minimum-deployment-target',
-            os.environ['IPHONEOS_DEPLOYMENT_TARGET'],
-        ])
-      else:
-        args.extend([
-            '--target-device', 'mac',
-            '--minimum-deployment-target',
-            os.environ['MACOSX_DEPLOYMENT_TARGET'],
-        ])
+      args.extend([
+          '--target-device', 'mac',
+          '--minimum-deployment-target',
+          os.environ['MACOSX_DEPLOYMENT_TARGET'],
+      ])
 
     args.extend(['--output-format', 'human-readable-text', '--compile', dest,
         source])
@@ -368,24 +361,12 @@ class MacTool(object):
       'xcrun', 'actool', '--output-format', 'human-readable-text',
       '--compress-pngs', '--notices', '--warnings', '--errors',
     ]
-    is_iphone_target = 'IPHONEOS_DEPLOYMENT_TARGET' in os.environ
-    if is_iphone_target:
-      platform = os.environ['CONFIGURATION'].split('-')[-1]
-      if platform not in ('iphoneos', 'iphonesimulator'):
-        platform = 'iphonesimulator'
-      command_line.extend([
-          '--platform', platform, '--target-device', 'iphone',
-          '--target-device', 'ipad', '--minimum-deployment-target',
-          os.environ['IPHONEOS_DEPLOYMENT_TARGET'], '--compile',
-          os.path.abspath(os.environ['CONTENTS_FOLDER_PATH']),
-      ])
-    else:
-      command_line.extend([
-          '--platform', 'macosx', '--target-device', 'mac',
-          '--minimum-deployment-target', os.environ['MACOSX_DEPLOYMENT_TARGET'],
-          '--compile',
-          os.path.abspath(os.environ['UNLOCALIZED_RESOURCES_FOLDER_PATH']),
-      ])
+    command_line.extend([
+        '--platform', 'macosx', '--target-device', 'mac',
+        '--minimum-deployment-target', os.environ['MACOSX_DEPLOYMENT_TARGET'],
+        '--compile',
+        os.path.abspath(os.environ['UNLOCALIZED_RESOURCES_FOLDER_PATH']),
+    ])
     if keys:
       keys = json.loads(keys)
       for key, value in keys.items():
@@ -416,8 +397,8 @@ class MacTool(object):
   def ExecCodeSignBundle(self, key, entitlements, provisioning, path, preserve):
     """Code sign a bundle.
 
-    This function tries to code sign an iOS bundle, following the same
-    algorithm as Xcode:
+    This function tries to code sign a bundle, following the same algorithm as
+    Xcode:
       1. pick the provisioning profile that best match the bundle identifier,
          and copy it into the bundle as embedded.mobileprovision,
       2. copy Entitlements.plist from user or SDK next to the bundle,

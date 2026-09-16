@@ -875,6 +875,13 @@ MacroAssembler::branchTestSymbol(Condition cond, Register tag, Label* label)
 }
 
 void
+MacroAssembler::branchTestBigInt(Condition cond, Register tag, Label* label)
+{
+    MOZ_ASSERT(cond == Equal || cond == NotEqual);
+    ma_b(tag, ImmTag(JSVAL_TAG_BIGINT), label, cond);
+}
+
+void
 MacroAssembler::branchTestSymbol(Condition cond, const BaseIndex& address, Label* label)
 {
     SecondScratchRegisterScope scratch2(*this);

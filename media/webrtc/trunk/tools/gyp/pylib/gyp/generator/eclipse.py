@@ -337,8 +337,8 @@ def GenerateCdtSettingsFile(target_list, target_dicts, data, params,
 def GenerateClasspathFile(target_list, target_dicts, toplevel_dir,
                           toplevel_build, out_name):
   '''Generates a classpath file suitable for symbol navigation and code
-  completion of Java code (such as in Android projects) by finding all
-  .java and .jar files used as action inputs.'''
+  completion of Java code by finding all .java and .jar files used as action
+  inputs.'''
   gyp.common.EnsureDirExists(out_name)
   result = ET.Element('classpath')
 
@@ -422,4 +422,3 @@ def GenerateOutput(target_list, target_dicts, data, params):
     for config_name in config_names:
       GenerateOutputForConfig(target_list, target_dicts, data, params,
                               config_name)
-

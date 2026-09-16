@@ -593,8 +593,6 @@ def CalculateVariables(default_variables, params):
     gyp.msvs_emulation.CalculateCommonVariables(default_variables, params)
   else:
     operating_system = flavor
-    if flavor == 'android':
-      operating_system = 'linux'  # Keep this legacy behavior for now.
     default_variables.setdefault('OS', operating_system)
 
 

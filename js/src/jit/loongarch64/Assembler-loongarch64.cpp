@@ -49,11 +49,6 @@ void js::jit::PatchJump(CodeLocationJump& jump_, CodeLocationLabel label,
 // Note this is used for inter-wasm calls and may pass arguments and results
 // in floating point registers even if the system ABI does not.
 
-// TODO(loongarch64): Inconsistent with LoongArch's calling convention.
-// LoongArch floating-point parameters calling convention:
-//   The first eight floating-point parameters should be passed in f0-f7, and
-//   the other floating point parameters will be passed like integer parameters.
-// But we just pass the other floating-point parameters on stack here.
 ABIArg ABIArgGenerator::next(MIRType type) {
   switch (type) {
     case MIRType::Int32:
@@ -70,16 +65,40 @@ ABIArg ABIArgGenerator::next(MIRType type) {
     }
     case MIRType::Float32:
     case MIRType::Double: {
-      if (floatRegIndex_ == NumFloatArgRegs) {
+      if (floatRegIndex_ < NumFloatArgRegs) {
+        current_ = ABIArg(FloatRegister(
+            FloatRegisters::Encoding(floatRegIndex_ + f0.encoding()),
+            type == MIRType::Double ? FloatRegisters::Double
+                                    : FloatRegisters::Single));
+        floatRegIndex_++;
+        break;
+      }
+      if (intRegIndex_ == NumIntArgRegs) {
         current_ = ABIArg(stackOffset_);
         stackOffset_ += sizeof(double);
         break;
       }
-      current_ = ABIArg(FloatRegister(
-          FloatRegisters::Encoding(floatRegIndex_ + f0.encoding()),
-          type == MIRType::Double ? FloatRegisters::Double
-                                  : FloatRegisters::Single));
-      floatRegIndex_++;
+      current_ = ABIArg(Register::FromCode(intRegIndex_ + a0.encoding()));
+      intRegIndex_++;
+      break;
+    }
+    case MIRType::Int8x16:
+    case MIRType::Int16x8:
+    case MIRType::Int32x4:
+    case MIRType::Float32x4:
+    case MIRType::Bool8x16:
+    case MIRType::Bool16x8:
+    case MIRType::Bool32x4: {
+      if (floatRegIndex_ < NumFloatArgRegs) {
+        current_ = ABIArg(FloatRegister(
+            FloatRegisters::Encoding(floatRegIndex_ + f0.encoding()),
+            FloatRegisters::Simd128));
+        floatRegIndex_++;
+        break;
+      }
+      stackOffset_ = AlignBytes(stackOffset_, SimdMemoryAlignment);
+      current_ = ABIArg(stackOffset_);
+      stackOffset_ += Simd128DataSize;
       break;
     }
     default:
@@ -320,7 +339,6 @@ size_t AssemblerLOONGARCH64::bytesNeeded() const {
 
 // write a blob of binary into the instruction stream
 BufferOffset AssemblerLOONGARCH64::writeInst(uint32_t x, uint32_t* dest) {
-  MOZ_ASSERT(hasCreator());
   if (dest == nullptr) {
     return m_buffer.putInt(x);
   }
@@ -335,8 +353,19 @@ void AssemblerLOONGARCH64::WriteInstStatic(uint32_t x, uint32_t* dest) {
 }
 
 BufferOffset AssemblerLOONGARCH64::haltingAlign(int alignment) {
-  // TODO(loongarch64): Implement a proper halting align.
-  return nopAlign(alignment);
+  BufferOffset ret;
+  MOZ_ASSERT(m_buffer.isAligned(4));
+  MOZ_ASSERT((alignment & (alignment - 1)) == 0);
+
+  while (size() & (alignment - 1)) {
+    BufferOffset tmp(size());
+    as_break(WASM_TRAP);
+    if (!ret.assigned()) {
+      ret = tmp;
+    }
+  }
+
+  return ret;
 }
 
 BufferOffset AssemblerLOONGARCH64::nopAlign(int alignment) {
@@ -437,10 +466,30 @@ InstImm AssemblerLOONGARCH64::getBranchCode(JumpOrCall jumpOrCall) {
 }
 
 InstImm AssemblerLOONGARCH64::getBranchCode(Register rj, Register rd, Condition c) {
-  // beq, bne
-  MOZ_ASSERT(c == AssemblerLOONGARCH64::Equal || c == AssemblerLOONGARCH64::NotEqual);
-  return InstImm(c == AssemblerLOONGARCH64::Equal ? op_beq : op_bne, BOffImm16(0),
-                 rj, rd);
+  switch (c) {
+    case AssemblerLOONGARCH64::Equal:
+      return InstImm(op_beq, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::NotEqual:
+      return InstImm(op_bne, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::Above:
+      return InstImm(op_bltu, BOffImm16(0), rd, rj);
+    case AssemblerLOONGARCH64::AboveOrEqual:
+      return InstImm(op_bgeu, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::Below:
+      return InstImm(op_bltu, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::BelowOrEqual:
+      return InstImm(op_bgeu, BOffImm16(0), rd, rj);
+    case AssemblerLOONGARCH64::GreaterThan:
+      return InstImm(op_blt, BOffImm16(0), rd, rj);
+    case AssemblerLOONGARCH64::GreaterThanOrEqual:
+      return InstImm(op_bge, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::LessThan:
+      return InstImm(op_blt, BOffImm16(0), rj, rd);
+    case AssemblerLOONGARCH64::LessThanOrEqual:
+      return InstImm(op_bge, BOffImm16(0), rd, rj);
+    default:
+      MOZ_CRASH("Condition not supported.");
+  }
 }
 
 InstImm AssemblerLOONGARCH64::getBranchCode(Register rj, Condition c) {
@@ -1011,6 +1060,118 @@ BufferOffset AssemblerLOONGARCH64::as_st_d(Register rd, Register rj, int32_t si1
   return writeInst(InstImm(op_st_d, si12, rj, rd, 12).encode());
 }
 
+BufferOffset AssemblerLOONGARCH64::as_vld(FloatRegister vd, Register rj,
+                                          int32_t si12) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(is_intN(si12, 12));
+  spew("vld   %3s,%3s,0x%x", vd.name(), rj.name(), si12);
+  return writeInst(InstImm(op_vld, si12, rj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vst(FloatRegister vd, Register rj,
+                                          int32_t si12) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(is_intN(si12, 12));
+  spew("vst   %3s,%3s,0x%x", vd.name(), rj.name(), si12);
+  return writeInst(InstImm(op_vst, si12, rj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_clt_s(FloatRegister vd,
+                                                  FloatRegister vj,
+                                                  FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.clt.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_clt_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_ceq_s(FloatRegister vd,
+                                                  FloatRegister vj,
+                                                  FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.ceq.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_ceq_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_cle_s(FloatRegister vd,
+                                                  FloatRegister vj,
+                                                  FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.cle.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_cle_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_cun_s(FloatRegister vd,
+                                                  FloatRegister vj,
+                                                  FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.cun.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_cun_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_cult_s(FloatRegister vd,
+                                                   FloatRegister vj,
+                                                   FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.cult.s %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_cult_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_cule_s(FloatRegister vd,
+                                                   FloatRegister vj,
+                                                   FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.cule.s %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_cule_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfcmp_cune_s(FloatRegister vd,
+                                                   FloatRegister vj,
+                                                   FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfcmp.cune.s %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfcmp_cune_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vbitsel_v(FloatRegister vd,
+                                                FloatRegister vj,
+                                                FloatRegister vk,
+                                                FloatRegister va) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  MOZ_ASSERT(va.isSimd128());
+  spew("vbitsel.v    %3s,%3s,%3s,%3s", vd.name(), vj.name(), vk.name(),
+       va.name());
+  return writeInst(InstReg(op_vbitsel_v, va, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vshuf_b(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk,
+                                              FloatRegister va) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  MOZ_ASSERT(va.isSimd128());
+  spew("vshuf.b      %3s,%3s,%3s,%3s", vd.name(), vj.name(), vk.name(),
+       va.name());
+  return writeInst(InstReg(op_vshuf_b, va, vk, vj, vd).encode());
+}
+
 BufferOffset AssemblerLOONGARCH64::as_ldx_b(Register rd, Register rj, Register rk) {
   spew("ldx_b    %3s,%3s,%3s", rd.name(), rj.name(), rk.name());
   return writeInst(InstReg(op_ldx_b, rk, rj, rd).encode());
@@ -1067,6 +1228,425 @@ BufferOffset AssemblerLOONGARCH64::as_stx_w(Register rd, Register rj, Register r
 BufferOffset AssemblerLOONGARCH64::as_stx_d(Register rd, Register rj, Register rk) {
   spew("stx_d    %3s,%3s,%3s", rd.name(), rj.name(), rk.name());
   return writeInst(InstReg(op_stx_d, rk, rj, rd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vldx(FloatRegister vd, Register rj,
+                                           Register rk) {
+  MOZ_ASSERT(vd.isSimd128());
+  spew("vldx    %3s,%3s,%3s", vd.name(), rj.name(), rk.name());
+  return writeInst(InstReg(op_vldx, rk, rj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vstx(FloatRegister vd, Register rj,
+                                           Register rk) {
+  MOZ_ASSERT(vd.isSimd128());
+  spew("vstx    %3s,%3s,%3s", vd.name(), rj.name(), rk.name());
+  return writeInst(InstReg(op_vstx, rk, rj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vseq_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vseq.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vseq_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsle_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsle.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsle_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsle_wu(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsle.wu  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsle_wu, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vslt_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vslt.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vslt_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vslt_wu(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vslt.wu  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vslt_wu, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vadd_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vadd.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vadd_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsub_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsub.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsub_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vmax_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vmax.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vmax_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vmin_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vmin.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vmin_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vmax_wu(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vmax.wu  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vmax_wu, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vmin_wu(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vmin.wu  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vmin_wu, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vmul_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vmul.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vmul_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsll_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsll.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsll_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsrl_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsrl.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsrl_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsra_w(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vsra.w   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vsra_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vilvl_w(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vilvl.w  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vilvl_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vilvh_w(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vilvh.w  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vilvh_w, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vand_v(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vand.v   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vand_v, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vor_v(FloatRegister vd, FloatRegister vj,
+                                            FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vor.v    %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vor_v, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vxor_v(FloatRegister vd, FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vxor.v   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vxor_v, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vnor_v(FloatRegister vd,
+                                             FloatRegister vj,
+                                             FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vnor.v   %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vnor_v, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vandn_v(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vandn.v  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vandn_v, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfadd_s(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfadd.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfadd_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfsub_s(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfsub.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfsub_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfmul_s(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfmul.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfmul_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfmax_s(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfmax.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfmax_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfmin_s(FloatRegister vd,
+                                              FloatRegister vj,
+                                              FloatRegister vk) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(vk.isSimd128());
+  spew("vfmin.s  %3s,%3s,%3s", vd.name(), vj.name(), vk.name());
+  return writeInst(InstReg(op_vfmin_s, vk, vj, vd).encode());
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vneg_w(FloatRegister vd,
+                                             FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vneg.w   %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vneg_w | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfsqrt_s(FloatRegister vd,
+                                               FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vfsqrt.s %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vfsqrt_s | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfrecip_s(FloatRegister vd,
+                                                FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vfrecip.s %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vfrecip_s | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfrsqrt_s(FloatRegister vd,
+                                                FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vfrsqrt.s %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vfrsqrt_s | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vfrint_s(FloatRegister vd,
+                                               FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vfrint.s %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vfrint_s | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vffint_s_w(FloatRegister vd,
+                                                 FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vffint.s.w %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vffint_s_w | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vftint_w_s(FloatRegister vd,
+                                                 FloatRegister vj) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  spew("vftint.w.s %3s,%3s", vd.name(), vj.name());
+  return writeInst(op_vftint_w_s | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vreplgr2vr_w(FloatRegister vd,
+                                                   Register rj) {
+  MOZ_ASSERT(vd.isSimd128());
+  spew("vreplgr2vr.w %3s,%3s", vd.name(), rj.name());
+  return writeInst(op_vreplgr2vr_w | RJ(rj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vreplvei_w(FloatRegister vd,
+                                                 FloatRegister vj,
+                                                 uint32_t lane) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(lane < 4);
+  spew("vreplvei.w %3s,%3s,%u", vd.name(), vj.name(), lane);
+  return writeInst(op_vreplvei_w | (lane << RKShift) | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vinsgr2vr_w(FloatRegister vd,
+                                                  Register rj,
+                                                  uint32_t lane) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(lane < 4);
+  spew("vinsgr2vr.w %3s,%3s,%u", vd.name(), rj.name(), lane);
+  return writeInst(op_vinsgr2vr_w | (lane << RKShift) | RJ(rj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vpickve2gr_w(Register rd,
+                                                   FloatRegister vj,
+                                                   uint32_t lane) {
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(lane < 4);
+  spew("vpickve2gr.w %3s,%3s,%u", rd.name(), vj.name(), lane);
+  return writeInst(op_vpickve2gr_w | (lane << RKShift) | FJ(vj) | RD(rd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vpickve2gr_wu(Register rd,
+                                                    FloatRegister vj,
+                                                    uint32_t lane) {
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(lane < 4);
+  spew("vpickve2gr.wu %3s,%3s,%u", rd.name(), vj.name(), lane);
+  return writeInst(op_vpickve2gr_wu | (lane << RKShift) | FJ(vj) | RD(rd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vslli_w(FloatRegister vd,
+                                              FloatRegister vj,
+                                              uint32_t imm) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(imm < 32);
+  spew("vslli.w  %3s,%3s,%u", vd.name(), vj.name(), imm);
+  return writeInst(op_vslli_w | (imm << RKShift) | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsrli_w(FloatRegister vd,
+                                              FloatRegister vj,
+                                              uint32_t imm) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(imm < 32);
+  spew("vsrli.w  %3s,%3s,%u", vd.name(), vj.name(), imm);
+  return writeInst(op_vsrli_w | (imm << RKShift) | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vsrai_w(FloatRegister vd,
+                                              FloatRegister vj,
+                                              uint32_t imm) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(vj.isSimd128());
+  MOZ_ASSERT(imm < 32);
+  spew("vsrai.w  %3s,%3s,%u", vd.name(), vj.name(), imm);
+  return writeInst(op_vsrai_w | (imm << RKShift) | FJ(vj) | FD(vd));
+}
+
+BufferOffset AssemblerLOONGARCH64::as_vldi(FloatRegister vd, int32_t imm) {
+  MOZ_ASSERT(vd.isSimd128());
+  MOZ_ASSERT(is_intN(imm, 13));
+  spew("vldi     %3s,%d", vd.name(), imm);
+  return writeInst(op_vldi | ((imm & Imm13Mask) << Imm13Shift) | FD(vd));
 }
 
 BufferOffset AssemblerLOONGARCH64::as_ldptr_w(Register rd, Register rj,

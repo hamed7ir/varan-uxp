@@ -615,6 +615,25 @@ CodeGeneratorMIPS64::visitExtendInt32ToInt64(LExtendInt32ToInt64* lir)
 }
 
 void
+CodeGeneratorMIPS64::visitSignExtendInt64(LSignExtendInt64* lir)
+{
+    Register64 input = ToRegister64(lir->getInt64Operand(0));
+    Register64 output = ToOutRegister64(lir);
+
+    switch (lir->mode()) {
+      case MSignExtendInt64::Byte:
+        masm.move8SignExtend(input.reg, output.reg);
+        break;
+      case MSignExtendInt64::Half:
+        masm.move16SignExtend(input.reg, output.reg);
+        break;
+      case MSignExtendInt64::Word:
+        masm.ma_sll(output.reg, input.reg, Imm32(0));
+        break;
+    }
+}
+
+void
 CodeGeneratorMIPS64::visitWrapInt64ToInt32(LWrapInt64ToInt32* lir)
 {
     const LAllocation* input = lir->getOperand(0);

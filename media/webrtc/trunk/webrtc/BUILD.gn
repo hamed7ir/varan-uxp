@@ -35,12 +35,6 @@ config("common_inherited_config") {
   if (is_posix) {
     defines += [ "WEBRTC_POSIX" ]
   }
-  if (is_ios) {
-    defines += [
-      "WEBRTC_MAC",
-      "WEBRTC_IOS",
-    ]
-  }
   if (is_linux) {
     defines += [ "WEBRTC_LINUX" ]
   }
@@ -49,15 +43,6 @@ config("common_inherited_config") {
   }
   if (is_win) {
     defines += [ "WEBRTC_WIN" ]
-  }
-  if (is_android) {
-    defines += [
-      "WEBRTC_LINUX",
-      "WEBRTC_ANDROID",
-    ]
-    if (rtc_enable_android_opensl) {
-      defines += [ "WEBRTC_ANDROID_OPENSLES" ]
-    }
   }
 }
 
@@ -73,12 +58,9 @@ config("common_config") {
   } else {
     if (is_posix) {
       # -Wextra is currently disabled in Chromium"s common.gypi. Enable
-      # for targets that can handle it. For Android/arm64 right now
-      # there will be an "enumeral and non-enumeral type in conditional
-      # expression" warning in android_tools/ndk_experimental"s version
-      # of stlport.
+      # for targets that can handle it.
       # See: https://code.google.com/p/chromium/issues/detail?id=379699
-      if (current_cpu != "arm64" || !is_android) {
+      if (current_cpu != "arm64") {
         cflags = [
           "-Wextra",
           # We need to repeat some flags from Chromium"s common.gypi
@@ -116,8 +98,6 @@ config("common_config") {
       defines += [ "WEBRTC_ARCH_ARM_V7" ]
       if (arm_use_neon) {
         defines += [ "WEBRTC_ARCH_ARM_NEON" ]
-      } else if (is_android) {
-        defines += [ "WEBRTC_DETECT_ARM_NEON" ]
       }
     }
   }
@@ -143,16 +123,6 @@ config("common_config") {
   # TODO(kjellander): Handle warnings on Windows where WebRTC differ from the
   # default warnings set in build/config/compiler/BUILD.gn.
 
-  if (is_android && is_clang) {
-    # The Android NDK doesn"t provide optimized versions of these
-    # functions. Ensure they are disabled for all compilers.
-    cflags += [
-      "-fno-builtin-cos",
-      "-fno-builtin-sin",
-      "-fno-builtin-cosf",
-      "-fno-builtin-sinf",
-    ]
-  }
 }
 
 source_set("webrtc") {

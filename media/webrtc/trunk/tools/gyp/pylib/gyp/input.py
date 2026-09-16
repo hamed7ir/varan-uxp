@@ -943,7 +943,7 @@ def ExpandVariables(input, phase, variables, build_file):
     else:
       if not contents in variables:
         if contents[-1] in ['!', '/']:
-          # In order to allow cross-compiles (nacl) to happen more naturally,
+          # In order to allow cross-compiles to happen more naturally,
           # we will allow references to >(sources/) etc. to resolve to
           # and empty list if undefined. This allows actions to:
           # 'action!': [

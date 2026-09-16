@@ -249,9 +249,9 @@ class FloatRegisters {
   // Eight bits: (invalid << 7) | (kind << 5) | encoding
   typedef uint8_t Code;
   typedef FPRegisterID Encoding;
-  typedef uint64_t SetType;
+  typedef unsigned __int128 SetType;
 
-  enum Kind : uint8_t { Double, Single, NumTypes };
+  enum Kind : uint8_t { Double, Single, Simd128, NumTypes };
 
   static constexpr Code Invalid = 0x80;
 
@@ -285,7 +285,11 @@ class FloatRegisters {
                                       << (uint32_t(Single) * TotalPhys);
   static const SetType SpreadDouble = SetType(1)
                                       << (uint32_t(Double) * TotalPhys);
-  static const SetType Spread = SpreadSingle | SpreadDouble;
+  static const SetType SpreadSimd128 = SetType(1)
+                                       << (uint32_t(Simd128) * TotalPhys);
+  static const SetType SpreadScalar = SpreadSingle | SpreadDouble;
+  static const SetType SpreadVector = SpreadSimd128;
+  static const SetType Spread = SpreadScalar | SpreadVector;
 
   static const SetType AllPhysMask = ((SetType(1) << TotalPhys) - 1);
   static const SetType AllMask = AllPhysMask * Spread;
@@ -293,13 +297,16 @@ class FloatRegisters {
   static const SetType AllDoubleMask = AllPhysMask * SpreadDouble;
   static const SetType NoneMask = SetType(0);
 
-  // TODO(loongarch64): Much less than ARM64 here.
+  // LoongArch64 callee-saved floating-point registers are f24-f31.
   static const SetType NonVolatileMask =
-      SetType((1 << FloatRegisters::f24) | (1 << FloatRegisters::f25) |
-              (1 << FloatRegisters::f26) | (1 << FloatRegisters::f27) |
-              (1 << FloatRegisters::f28) | (1 << FloatRegisters::f29) |
-              (1 << FloatRegisters::f30) | (1 << FloatRegisters::f31)) *
-      Spread;
+      ((SetType(1) << FloatRegisters::f24) |
+       (SetType(1) << FloatRegisters::f25) |
+       (SetType(1) << FloatRegisters::f26) |
+       (SetType(1) << FloatRegisters::f27) |
+       (SetType(1) << FloatRegisters::f28) |
+       (SetType(1) << FloatRegisters::f29) |
+       (SetType(1) << FloatRegisters::f30) |
+       (SetType(1) << FloatRegisters::f31)) * Spread;
 
   static const SetType VolatileMask = AllMask & ~NonVolatileMask;
 
@@ -317,6 +324,8 @@ class FloatRegisters {
   union RegisterContent {
     float s;
     double d;
+    int32_t i4[4];
+    float s4[4];
   };
 
   static constexpr Encoding encoding(Code c) {
@@ -359,26 +368,35 @@ struct FloatRegister {
   typedef Codes::SetType SetType;
 
   static uint32_t SetSize(SetType x) {
-    static_assert(sizeof(SetType) == 8, "SetType must be 64 bits");
+    static_assert(sizeof(SetType) == 16, "SetType must be 128 bits");
     x |= x >> FloatRegisters::TotalPhys;
+    x |= x >> (2 * FloatRegisters::TotalPhys);
     x &= FloatRegisters::AllPhysMask;
     return mozilla::CountPopulation32(x);
   }
 
   static uint32_t FirstBit(SetType x) {
-    static_assert(sizeof(SetType) == 8, "SetType");
-    return mozilla::CountTrailingZeroes64(x);
+    MOZ_ASSERT(x != 0);
+    uint64_t low = uint64_t(x);
+    if (low) {
+      return mozilla::CountTrailingZeroes64(low);
+    }
+    return 64 + mozilla::CountTrailingZeroes64(uint64_t(x >> 64));
   }
   static uint32_t LastBit(SetType x) {
-    static_assert(sizeof(SetType) == 8, "SetType");
-    return 63 - mozilla::CountLeadingZeroes64(x);
+    MOZ_ASSERT(x != 0);
+    uint64_t high = uint64_t(x >> 64);
+    if (high) {
+      return 127 - mozilla::CountLeadingZeroes64(high);
+    }
+    return 63 - mozilla::CountLeadingZeroes64(uint64_t(x));
   }
 
  private:
   // These fields only hold valid values: an invalid register is always
   // represented as a valid encoding and kind with the invalid_ bit set.
   uint8_t encoding_;  // 32 encodings
-  uint8_t kind_;      // Double, Single; more later
+  uint8_t kind_;      // Double, Single, Simd128
   bool invalid_;
 
   typedef Codes::Kind Kind;
@@ -387,6 +405,8 @@ struct FloatRegister {
   union RegisterContent {
     float s;
     double d;
+    int32_t i4[4];
+    float s4[4];
   };
 
   constexpr FloatRegister(Encoding encoding, Kind kind)
@@ -417,7 +437,7 @@ struct FloatRegister {
   }
   bool isSimd128() const {
     MOZ_ASSERT(!invalid_);
-    return false;
+    return kind_ == FloatRegisters::Simd128;
   }
   bool isInvalid() const { return invalid_; }
 
@@ -430,12 +450,18 @@ struct FloatRegister {
     return FloatRegister(Encoding(encoding_), FloatRegisters::Double);
   }
   FloatRegister doubleOverlay() const { return asDouble(); }
-  FloatRegister asSimd128() const { MOZ_CRASH(); }
+  FloatRegister asSimd128() const {
+    MOZ_ASSERT(!invalid_);
+    return FloatRegister(Encoding(encoding_), FloatRegisters::Simd128);
+  }
 
   constexpr uint32_t size() const {
     MOZ_ASSERT(!invalid_);
     if (kind_ == FloatRegisters::Double) {
       return sizeof(double);
+    }
+    if (kind_ == FloatRegisters::Simd128) {
+      return 4 * sizeof(int32_t);
     }
     MOZ_ASSERT(kind_ == FloatRegisters::Single);
     return sizeof(float);

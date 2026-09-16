@@ -6,5 +6,9 @@
 #else
 #define AV_HAVE_BIGENDIAN 0
 #endif
+#if defined(__mips__)
+#define AV_HAVE_FAST_UNALIGNED 0
+#else
 #define AV_HAVE_FAST_UNALIGNED 1
+#endif
 #endif /* AVUTIL_AVCONFIG_H */

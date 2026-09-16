@@ -55,6 +55,13 @@
 #include "config_unix_ppc.h"
 #elif defined(__sparcv9) || defined(__sparcv9__)
 #include "config_unix_sparc64.h"
+#elif defined(__mips__)
+// This is needed to avoid enabling x86 assembly on 64-bit MIPS.
+#include "config_unix32.h"
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#undef HAVE_BIGENDIAN
+#define HAVE_BIGENDIAN 1
+#endif
 #elif defined(__loongarch64)
 #include "config_unix_loongarch64.h"
 #else

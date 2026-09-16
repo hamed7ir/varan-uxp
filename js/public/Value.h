@@ -238,16 +238,21 @@ static inline JS::Value PoisonedObjectValue(JSObject* obj);
 namespace detail {
 
 constexpr int CanonicalizedNaNSignBit = 0;
-#if defined(__mips__) && !defined(__mips_nan2008)
-constexpr uint64_t CanonicalizedNaNSignificand = 0x7FFFFFFFFFFFFULL;
-#else
 constexpr uint64_t CanonicalizedNaNSignificand = 0x8000000000000ULL;
-#endif
 
+// A legacy MIPS ABI can run on hardware whose native NaN encoding does not
+// match the encoding selected by the compiler. Determine the canonical NaN
+// from an actual floating-point operation during JS initialization.
+#if defined(__mips__) && !defined(__mips_nan2008) && \
+    !defined(__mips_nan_2008)
+# define JS_RUNTIME_CANONICAL_NAN
+extern JS_PUBLIC_DATA(uint64_t) CanonicalizedNaNBits;
+#else
 constexpr uint64_t CanonicalizedNaNBits =
     mozilla::SpecificNaNBits<double,
                              detail::CanonicalizedNaNSignBit,
                              detail::CanonicalizedNaNSignificand>::value;
+#endif
 
 } // namespace detail
 
@@ -260,8 +265,7 @@ constexpr uint64_t CanonicalizedNaNBits =
 static MOZ_ALWAYS_INLINE double
 GenericNaN()
 {
-  return mozilla::SpecificNaN<double>(detail::CanonicalizedNaNSignBit,
-                                      detail::CanonicalizedNaNSignificand);
+  return mozilla::BitwiseCast<double>(detail::CanonicalizedNaNBits);
 }
 
 /* MSVC with PGO miscompiles this function. */
@@ -355,6 +359,11 @@ class MOZ_NON_PARAM alignas(8) Value
     }
 
     void setDouble(double d) {
+#if defined(JS_RUNTIME_CANONICAL_NAN) && defined(JS_PUNBOX64)
+        // A non-canonical NaN can overlap the punbox64 tag space. Normalize
+        // it before storing it so it cannot be mistaken for a GC pointer.
+        d = CanonicalizeNaN(d);
+#endif
         // Don't assign to data.asDouble to fix a miscompilation with
         // GCC 5.2.1 and 5.3.1. See bug 1312488.
         data = layout(d);

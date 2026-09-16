@@ -1497,17 +1497,17 @@ MacroAssemblerMIPS64Compat::unboxSymbol(Register src, Register dest)
 
 void MacroAssemblerMIPS64Compat::unboxBigInt(const ValueOperand& operand, Register dest)
 {
-  unboxNonDouble(operand, dest, JSVAL_TYPE_BIGINT);
+  unboxNonDouble(operand, dest);
 }
 
 void MacroAssemblerMIPS64Compat::unboxBigInt(Register src, Register dest)
 {
-  unboxNonDouble(src, dest, JSVAL_TYPE_BIGINT);
+  ma_dext(dest, src, Imm32(0), Imm32(JSVAL_TAG_SHIFT));
 }
 
 void MacroAssemblerMIPS64Compat::unboxBigInt(const Address& src, Register dest)
 {
-  unboxNonDouble(src, dest, JSVAL_TYPE_BIGINT);
+  unboxNonDouble(src, dest);
 }
 
 void
@@ -1559,6 +1559,11 @@ MacroAssemblerMIPS64Compat::unboxPrivate(const ValueOperand& src, Register dest)
 void
 MacroAssemblerMIPS64Compat::boxDouble(FloatRegister src, const ValueOperand& dest)
 {
+#if defined(JS_RUNTIME_CANONICAL_NAN)
+    // Legacy-ABI MIPS hardware can produce NaN payloads that overlap the
+    // punbox64 tag space. Normalize them before creating a JS::Value.
+    asMasm().canonicalizeDouble(src);
+#endif
     as_dmfc1(dest.valueReg(), src);
 }
 

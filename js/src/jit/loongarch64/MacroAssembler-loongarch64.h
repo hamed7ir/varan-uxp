@@ -199,6 +199,8 @@ class MacroAssemblerLOONGARCH64 : public Assembler {
   void ma_fld_d(FloatRegister ft, Address address);
   void ma_fst_d(FloatRegister ft, Address address);
   void ma_fst_s(FloatRegister ft, Address address);
+  void ma_vld(FloatRegister vt, Address address);
+  void ma_vst(FloatRegister vt, Address address);
 
   void ma_pop(FloatRegister f);
   void ma_push(FloatRegister f);
@@ -451,9 +453,11 @@ class MacroAssemblerLOONGARCH64 : public Assembler {
 
   void ma_fst_d(FloatRegister src, BaseIndex address);
   void ma_fst_s(FloatRegister src, BaseIndex address);
+  void ma_vst(FloatRegister src, BaseIndex address);
 
   void ma_fld_d(FloatRegister dest, const BaseIndex& src);
   void ma_fld_s(FloatRegister dest, const BaseIndex& src);
+  void ma_vld(FloatRegister dest, const BaseIndex& src);
 
   // FP branches
   void ma_bc_s(FloatRegister lhs, FloatRegister rhs, Label* label,
@@ -631,6 +635,139 @@ class MacroAssemblerLOONGARCH64 : public Assembler {
   void loadFloat32(const Address& addr, FloatRegister dest);
   void loadFloat32(const BaseIndex& src, FloatRegister dest);
 
+  void loadUnalignedSimd128Float(const Address& src, FloatRegister dest);
+  void loadUnalignedSimd128Float(const BaseIndex& src, FloatRegister dest);
+  void storeUnalignedSimd128Float(FloatRegister src, const Address& dest);
+  void storeUnalignedSimd128Float(FloatRegister src, const BaseIndex& dest);
+  void loadAlignedSimd128Float(const Address& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void loadAlignedSimd128Float(const BaseIndex& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void storeAlignedSimd128Float(FloatRegister src, const Address& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
+  void storeAlignedSimd128Float(FloatRegister src, const BaseIndex& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
+  void loadConstantSimd128Float(const SimdConstant& v, FloatRegister dest);
+  void loadConstantSimd128Int(const SimdConstant& v, FloatRegister dest);
+  void moveSimd128Float(FloatRegister src, FloatRegister dest);
+  void moveSimd128Int(FloatRegister src, FloatRegister dest) {
+    moveSimd128Float(src, dest);
+  }
+  void zeroSimd128Float(FloatRegister dest);
+  void zeroSimd128Int(FloatRegister dest) { zeroSimd128Float(dest); }
+  void createInt32x4(Register lane0, Register lane1, Register lane2,
+                     Register lane3, FloatRegister dest);
+  void splatX4(Register input, FloatRegister output);
+  void splatX4(FloatRegister input, FloatRegister output);
+  void extractLaneInt32x4(FloatRegister input, Register output, unsigned lane);
+  void extractLaneFloat32x4(FloatRegister input, FloatRegister output,
+                            unsigned lane, bool canonicalize);
+  void insertLaneSimdInt(FloatRegister input, Register value,
+                         FloatRegister output, unsigned lane,
+                         unsigned numLanes);
+  void insertLaneFloat32x4(FloatRegister input, FloatRegister value,
+                           FloatRegister output, unsigned lane);
+  void addInt32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void subInt32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void mulInt32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void minInt32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void maxInt32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void minUint32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void maxUint32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void negInt32x4(FloatRegister input, FloatRegister dest);
+  void shiftLeftInt32x4(FloatRegister lhs, FloatRegister rhs,
+                        FloatRegister dest);
+  void shiftRightInt32x4(FloatRegister lhs, FloatRegister rhs,
+                         FloatRegister dest);
+  void unsignedShiftRightInt32x4(FloatRegister lhs, FloatRegister rhs,
+                                 FloatRegister dest);
+  void shiftLeftInt32x4(FloatRegister lhs, Imm32 rhs, FloatRegister dest);
+  void shiftRightInt32x4(FloatRegister lhs, Imm32 rhs, FloatRegister dest);
+  void unsignedShiftRightInt32x4(FloatRegister lhs, Imm32 rhs,
+                                 FloatRegister dest);
+  void compareInt32x4Equal(FloatRegister lhs, FloatRegister rhs,
+                           FloatRegister dest);
+  void compareInt32x4LessThan(FloatRegister lhs, FloatRegister rhs,
+                              FloatRegister dest);
+  void compareInt32x4LessThanOrEqual(FloatRegister lhs, FloatRegister rhs,
+                                     FloatRegister dest);
+  void compareUint32x4LessThan(FloatRegister lhs, FloatRegister rhs,
+                               FloatRegister dest);
+  void compareUint32x4LessThanOrEqual(FloatRegister lhs, FloatRegister rhs,
+                                      FloatRegister dest);
+  void addFloat32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void subFloat32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void mulFloat32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void minFloat32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void maxFloat32x4(FloatRegister lhs, FloatRegister rhs, FloatRegister dest);
+  void sqrtFloat32x4(FloatRegister input, FloatRegister dest);
+  void reciprocalApproximationFloat32x4(FloatRegister input, FloatRegister dest);
+  void reciprocalSqrtApproximationFloat32x4(FloatRegister input,
+                                            FloatRegister dest);
+  void roundFloat32x4(FloatRegister input, FloatRegister dest);
+  void convertInt32x4ToFloat32x4(FloatRegister input, FloatRegister dest);
+  void convertFloat32x4ToInt32x4(FloatRegister input, FloatRegister dest);
+  void compareFloat32x4Equal(FloatRegister lhs, FloatRegister rhs,
+                             FloatRegister dest);
+  void compareFloat32x4NotEqual(FloatRegister lhs, FloatRegister rhs,
+                                FloatRegister dest);
+  void compareFloat32x4LessThan(FloatRegister lhs, FloatRegister rhs,
+                                FloatRegister dest);
+  void compareFloat32x4LessThanOrEqual(FloatRegister lhs, FloatRegister rhs,
+                                       FloatRegister dest);
+  void compareFloat32x4Unordered(FloatRegister lhs, FloatRegister rhs,
+                                 FloatRegister dest);
+  void compareFloat32x4UnorderedLessThan(FloatRegister lhs, FloatRegister rhs,
+                                         FloatRegister dest);
+  void compareFloat32x4UnorderedLessThanOrEqual(FloatRegister lhs,
+                                                FloatRegister rhs,
+                                                FloatRegister dest);
+  void interleaveLowInt32x4(FloatRegister lhs, FloatRegister rhs,
+                            FloatRegister dest);
+  void interleaveHighInt32x4(FloatRegister lhs, FloatRegister rhs,
+                             FloatRegister dest);
+  void bitselectSimd128(FloatRegister mask, FloatRegister onTrue,
+                        FloatRegister onFalse, FloatRegister dest);
+  void shuffleBytesSimd128(FloatRegister lhs, FloatRegister rhs,
+                           FloatRegister control, FloatRegister dest);
+  void bitwiseAndSimd128(FloatRegister lhs, FloatRegister rhs,
+                         FloatRegister dest);
+  void bitwiseOrSimd128(FloatRegister lhs, FloatRegister rhs,
+                        FloatRegister dest);
+  void bitwiseXorSimd128(FloatRegister lhs, FloatRegister rhs,
+                         FloatRegister dest);
+  void bitwiseNorSimd128(FloatRegister lhs, FloatRegister rhs,
+                         FloatRegister dest);
+  void bitwiseAndNotSimd128(FloatRegister lhs, FloatRegister rhs,
+                            FloatRegister dest);
+  void loadUnalignedSimd128Int(const Address& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void loadUnalignedSimd128Int(const BaseIndex& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void loadAlignedSimd128Int(const Address& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void loadAlignedSimd128Int(const BaseIndex& src, FloatRegister dest) {
+    loadUnalignedSimd128Float(src, dest);
+  }
+  void storeUnalignedSimd128Int(FloatRegister src, const Address& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
+  void storeUnalignedSimd128Int(FloatRegister src, const BaseIndex& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
+  void storeAlignedSimd128Int(FloatRegister src, const Address& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
+  void storeAlignedSimd128Int(FloatRegister src, const BaseIndex& dest) {
+    storeUnalignedSimd128Float(src, dest);
+  }
 
  protected:
   void wasmLoadImpl(const wasm::MemoryAccessDesc& access, Register memoryBase,

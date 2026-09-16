@@ -833,7 +833,14 @@ CodeGeneratorLoongArch64::visitWrapInt64ToInt32(LWrapInt64ToInt32* lir)
         else
             masm.ma_sll(output, ToRegister(input), Imm32(0));
     } else {
-        MOZ_CRASH("Not implemented.");
+        if (input->isMemory())
+            masm.load32(Address(ToAddress(input).base,
+                                ToAddress(input).offset + sizeof(int32_t)),
+                        output);
+        else {
+            masm.ma_dsrl(output, ToRegister(input), Imm32(32));
+            masm.ma_sll(output, output, Imm32(0));
+        }
     }
 }
 
@@ -1011,14 +1018,36 @@ CodeGeneratorLoongArch64::visitTestI64AndBranch(LTestI64AndBranch* lir)
 }
 
 void
+CodeGeneratorLoongArch64::visitWasmStackArg(LWasmStackArg* ins)
+{
+    MIRType type = ins->mir()->input()->type();
+
+    if (IsSimdType(type)) {
+        MOZ_ASSERT(ins->arg()->isFloatReg());
+        Address dst(StackPointer, ins->mir()->spOffset());
+        FloatRegister src = ToFloatRegister(ins->arg()).asSimd128();
+
+        if (type == MIRType::Float32x4)
+            masm.storeAlignedSimd128Float(src, dst);
+        else
+            masm.storeAlignedSimd128Int(src, dst);
+        return;
+    }
+
+    CodeGeneratorMIPSShared::visitWasmStackArg(ins);
+}
+
+void
 CodeGeneratorLoongArch64::setReturnDoubleRegs(LiveRegisterSet* regs)
 {
-    MOZ_ASSERT(ReturnFloat32Reg.reg_ == FloatRegisters::f0);
-    MOZ_ASSERT(ReturnDoubleReg.reg_ == FloatRegisters::f0);
+    MOZ_ASSERT(ReturnFloat32Reg.encoding() == FloatRegisters::f0);
+    MOZ_ASSERT(ReturnDoubleReg.encoding() == FloatRegisters::f0);
+    MOZ_ASSERT(ReturnSimd128Reg.encoding() == FloatRegisters::f0);
     FloatRegister f1 = { FloatRegisters::f1, FloatRegisters::Single };
     regs->add(ReturnFloat32Reg);
     regs->add(f1);
     regs->add(ReturnDoubleReg);
+    regs->add(ReturnSimd128Reg);
 }
 
 void

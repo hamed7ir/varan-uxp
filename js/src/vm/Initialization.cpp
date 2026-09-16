@@ -8,6 +8,8 @@
 #include "js/Initialization.h"
 
 #include "mozilla/Assertions.h"
+#include "mozilla/Casting.h"
+#include "mozilla/FloatingPoint.h"
 
 #include <ctype.h>
 
@@ -19,6 +21,7 @@
 #include "jit/ExecutableAllocator.h"
 #include "jit/Ion.h"
 #include "js/Utility.h"
+#include "js/Value.h"
 #include "unicode/uclean.h"
 #include "unicode/utypes.h"
 #include "vm/DateTime.h"
@@ -33,6 +36,31 @@ using JS::detail::libraryInitState;
 using js::FutexRuntime;
 
 InitState JS::detail::libraryInitState;
+
+// MIPS-specific
+#if defined(JS_RUNTIME_CANONICAL_NAN)
+namespace JS {
+namespace detail {
+JS_PUBLIC_DATA(uint64_t) CanonicalizedNaNBits;
+} // namespace detail
+} // namespace JS
+
+// MIPS-specific
+static void
+SetupCanonicalNaN()
+{
+    // Use a real hardware operation. A legacy MIPS ABI can run on hardware
+    // whose NaN behavior does not match the compiler's predefined NAN value.
+    volatile double infinity = mozilla::PositiveInfinity<double>();
+    volatile double hardwareNaN = infinity - infinity;
+    uint64_t hardwareNaNBits = mozilla::BitwiseCast<uint64_t>(hardwareNaN);
+    hardwareNaNBits &= ~mozilla::FloatingPoint<double>::kSignBit;
+
+    // The selected NaN must remain a double in the JS::Value representation.
+    MOZ_RELEASE_ASSERT(JS::Value::fromRawBits(hardwareNaNBits).isDouble());
+    JS::detail::CanonicalizedNaNBits = hardwareNaNBits;
+}
+#endif
 
 #ifdef DEBUG
 static unsigned
@@ -75,6 +103,11 @@ JS::detail::InitWithFailureDiagnostic(bool isDebugBuild)
                "JS_SetICUMemoryFunctions");
     MOZ_ASSERT(!JSRuntime::hasLiveRuntimes(),
                "how do we have live runtimes before JS_Init?");
+
+// MIPS-specific
+#if defined(JS_RUNTIME_CANONICAL_NAN)
+    SetupCanonicalNaN();
+#endif
 
     PRMJ_NowInit();
 

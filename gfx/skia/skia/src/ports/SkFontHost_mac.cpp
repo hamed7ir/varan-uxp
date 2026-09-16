@@ -73,7 +73,39 @@ static CFArrayRef SkCTFontManagerCopyAvailableFontFamilyNames() {
 #ifdef SK_BUILD_FOR_IOS
     return CFArrayCreate(nullptr, nullptr, 0, nullptr);
 #else
+#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
     return CTFontManagerCopyAvailableFontFamilyNames();
+#else
+    CFMutableArrayRef familyNames =
+            CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    if (!familyNames) {
+        return nullptr;
+    }
+
+    ATSFontFamilyIterator iterator;
+    OSStatus status = ATSFontFamilyIteratorCreate(kATSFontContextGlobal,
+                                                  nullptr,
+                                                  nullptr,
+                                                  kATSOptionFlagsDefaultScope,
+                                                  &iterator);
+    if (status != noErr) {
+        CFRelease(familyNames);
+        return nullptr;
+    }
+
+    ATSFontFamilyRef family;
+    while (ATSFontFamilyIteratorNext(iterator, &family) == noErr) {
+        CFStringRef familyName = nullptr;
+        if (ATSFontFamilyGetName(family, kATSOptionFlagsDefault, &familyName) == noErr &&
+            familyName) {
+            CFArrayAppendValue(familyNames, familyName);
+            CFRelease(familyName);
+        }
+    }
+
+    ATSFontFamilyIteratorRelease(&iterator);
+    return familyNames;
+#endif
 #endif
 }
 
@@ -908,6 +940,7 @@ CGRGBPixel* Offscreen::getCG(const SkScalerContext_Mac& context, const SkGlyph& 
 
         // Skia handles quantization and subpixel positioning,
         // so disable quantization and enabe subpixel positioning in CG.
+#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
         CGContextSetAllowsFontSubpixelQuantization(fCG, false);
         CGContextSetShouldSubpixelQuantizeFonts(fCG, false);
 
@@ -916,6 +949,7 @@ CGRGBPixel* Offscreen::getCG(const SkScalerContext_Mac& context, const SkGlyph& 
         // then CG cannot draw the glyph in the correct location without subpixel positioning.
         CGContextSetAllowsFontSubpixelPositioning(fCG, true);
         CGContextSetShouldSubpixelPositionFonts(fCG, true);
+#endif
 
         CGContextSetTextDrawingMode(fCG, kCGTextFill);
 
@@ -971,7 +1005,13 @@ CGRGBPixel* Offscreen::getCG(const SkScalerContext_Mac& context, const SkGlyph& 
     // So always make the font transform identity and place the transform on the context.
     point = CGPointApplyAffineTransform(point, context.fInvTransform);
 
+#if defined(MAC_OS_X_VERSION_10_7) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_7)
     CTFontDrawGlyphs(context.fCTFont, &glyphID, &point, 1, fCG);
+#else
+    CGContextSetFont(fCG, CTFontCopyGraphicsFont(context.fCTFont, NULL));
+    CGContextSetFontSize(fCG, CTFontGetSize(context.fCTFont));
+    CGContextShowGlyphsAtPositions(fCG, &glyphID, &point, 1);
+#endif
 
     SkASSERT(rowBytesPtr);
     *rowBytesPtr = rowBytes;
@@ -1682,6 +1722,7 @@ SkAdvancedTypefaceMetrics* SkTypeface_Mac::onGetAdvancedTypefaceMetrics(
 
 static SK_SFNT_ULONG get_font_type_tag(const SkTypeface_Mac* typeface) {
     CTFontRef ctFont = typeface->fFontRef.get();
+#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
     AutoCFRelease<CFNumberRef> fontFormatRef(
             static_cast<CFNumberRef>(CTFontCopyAttribute(ctFont, kCTFontFormatAttribute)));
     if (!fontFormatRef) {
@@ -1711,6 +1752,35 @@ static SK_SFNT_ULONG get_font_type_tag(const SkTypeface_Mac* typeface) {
             //Just the presence of the FontForge 'FFTM' table seems to throw it off.
             return SkSFNTHeader::fontType_WindowsTrueType::TAG;
     }
+#else
+    AutoCFRelease<CFStringRef> postScriptName(CTFontCopyPostScriptName(ctFont));
+    if (!postScriptName) {
+        return 0;
+    }
+
+    ATSFontRef atsFont =
+            ATSFontFindFromPostScriptName(postScriptName, kATSOptionFlagsDefault);
+    if (atsFont == kInvalidFont) {
+        return 0;
+    }
+
+    SkSFNTHeader header;
+    ByteCount headerSize = sizeof(header);
+    if (ATSFontGetTableDirectory(atsFont, headerSize, &header, &headerSize) != noErr ||
+        headerSize < sizeof(header.fontType)) {
+        return 0;
+    }
+
+    switch (header.fontType) {
+        case SkSFNTHeader::fontType_OpenTypeCFF::TAG:
+        case SkSFNTHeader::fontType_WindowsTrueType::TAG:
+        case SkSFNTHeader::fontType_MacTrueType::TAG:
+        case SkSFNTHeader::fontType_PostScript::TAG:
+            return header.fontType;
+        default:
+            return SkSFNTHeader::fontType_WindowsTrueType::TAG;
+    }
+#endif
 }
 
 SkStreamAsset* SkTypeface_Mac::onOpenStream(int* ttcIndex) const {

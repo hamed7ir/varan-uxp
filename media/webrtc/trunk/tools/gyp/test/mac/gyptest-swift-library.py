@@ -31,10 +31,8 @@ if sys.platform == 'darwin':
 
   test_cases = []
 
-  # Run this for iOS on XCode 6.0 or greater
   if TestMac.Xcode.Version() >= '0600':
-    test_cases.append(('Default', 'iphoneos'))
-    test_cases.append(('Default', 'iphonesimulator'))
+    test_cases.append(('Default', 'macosx'))
 
   # Run it for Mac on XCode 6.1 or greater
   if TestMac.Xcode.Version() >= '0610':

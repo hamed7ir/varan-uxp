@@ -101,7 +101,8 @@ static constexpr Register64 ReturnReg64(ReturnReg);
 static constexpr FloatRegister ReturnFloat32Reg{FloatRegisters::f0,
                                                 FloatRegisters::Single};
 static constexpr FloatRegister ReturnDoubleReg = f0;
-static constexpr FloatRegister ReturnSimd128Reg = InvalidFloatReg;
+static constexpr FloatRegister ReturnSimd128Reg{FloatRegisters::f0,
+                                                FloatRegisters::Simd128};
 
 static constexpr Register ScratchRegister = t7;
 static constexpr Register SecondScratchReg = t8;
@@ -121,7 +122,8 @@ struct SecondScratchRegisterScope : public AutoRegisterScope {
 static constexpr FloatRegister ScratchFloat32Reg{FloatRegisters::f23,
                                                  FloatRegisters::Single};
 static constexpr FloatRegister ScratchDoubleReg = f23;
-static constexpr FloatRegister ScratchSimd128Reg = InvalidFloatReg;
+static constexpr FloatRegister ScratchSimd128Reg{FloatRegisters::f23,
+                                                 FloatRegisters::Simd128};
 
 struct ScratchFloat32Scope : public AutoFloatRegisterScope {
   explicit ScratchFloat32Scope(MacroAssembler& masm)
@@ -212,6 +214,8 @@ static constexpr Register WasmTableCallIndexReg = ABINonArgReg3;
 static constexpr Register WasmIonExitRegCallee = t0;
 static constexpr Register WasmIonExitRegE0 = a0;
 static constexpr Register WasmIonExitRegE1 = a1;
+static constexpr Register WasmIonExitRegReturnData = JSReturnReg_Data;
+static constexpr Register WasmIonExitRegReturnType = JSReturnReg_Type;
 static constexpr Register WasmIonExitRegD0 = a0;
 static constexpr Register WasmIonExitRegD1 = a1;
 static constexpr Register WasmIonExitRegD2 = t0;
@@ -224,11 +228,20 @@ static constexpr Register WasmJitEntryReturnScratch = t1;
 static constexpr uint32_t ABIStackAlignment = 16;
 static constexpr uint32_t CodeAlignment = 16;
 
+// Does this architecture support SIMD conversions between Uint32x4 and
+// Float32x4?
+static constexpr bool SupportsUint32x4FloatConversions = false;
+
+// Does this architecture support comparisons of unsigned integer vectors?
+static constexpr bool SupportsUint8x16Compares = false;
+static constexpr bool SupportsUint16x8Compares = false;
+static constexpr bool SupportsUint32x4Compares = false;
+
 // This boolean indicates whether we support SIMD instructions flavoured for
 // this architecture or not. Rather than a method in the LIRGenerator, it is
 // here such that it is accessible from the entire codebase. Once full support
 // for SIMD is reached on all tier-1 platforms, this constant can be deleted.
-static constexpr bool SupportsSimd = false;
+static constexpr bool SupportsSimd = true;
 static constexpr uint32_t JitStackAlignment = 16;
 
 static constexpr uint32_t JitStackValueAlignment =
@@ -237,8 +250,8 @@ static_assert(JitStackAlignment % sizeof(Value) == 0 &&
                   JitStackValueAlignment >= 1,
               "Stack alignment should be a non-zero multiple of sizeof(Value)");
 
-// TODO(loongarch64): this is just a filler to prevent a build failure. The
-// LoongArch SIMD alignment requirements still need to be explored.
+// LoongArch LSX SIMD vectors are 128 bits wide, so use 16-byte alignment for
+// SIMD constants and wasm stack alignment even while SIMD codegen is disabled.
 static constexpr uint32_t SimdMemoryAlignment = 16;
 
 static_assert(CodeAlignment % SimdMemoryAlignment == 0,
@@ -258,9 +271,8 @@ static constexpr uint32_t WasmCheckedTailEntryOffset = 16u;
 
 static constexpr Scale ScalePointer = TimesEight;
 
-// TODO(loongarch64): Add LoongArch instruction types description.
-
-// LoongArch instruction encoding constants.
+// LoongArch instruction encoding constants. The assembler models the encodings
+// used by this backend as register, immediate, and jump instruction records.
 static const uint32_t RJShift = 5;
 static const uint32_t RJBits = 5;
 static const uint32_t RKShift = 10;
@@ -301,6 +313,8 @@ static const uint32_t Imm6Shift = 10;
 static const uint32_t Imm6Bits = 6;
 static const uint32_t Imm12Shift = 10;
 static const uint32_t Imm12Bits = 12;
+static const uint32_t Imm13Shift = 5;
+static const uint32_t Imm13Bits = 13;
 static const uint32_t Imm14Shift = 10;
 static const uint32_t Imm14Bits = 14;
 static const uint32_t Imm15Shift = 0;
@@ -331,6 +345,7 @@ static const uint32_t CODEMask = (1 << CODEBits) - 1;
 static const uint32_t Imm5Mask = (1 << Imm5Bits) - 1;
 static const uint32_t Imm6Mask = (1 << Imm6Bits) - 1;
 static const uint32_t Imm12Mask = (1 << Imm12Bits) - 1;
+static const uint32_t Imm13Mask = (1 << Imm13Bits) - 1;
 static const uint32_t Imm14Mask = (1 << Imm14Bits) - 1;
 static const uint32_t Imm15Mask = (1 << Imm15Bits) - 1;
 static const uint32_t Imm16Mask = (1 << Imm16Bits) - 1;
@@ -342,11 +357,11 @@ static const uint32_t BOffImm21Mask = ((1 << Imm21Bits) - 1) << Imm21Shift;
 static const uint32_t BOffImm26Mask = ((1 << Imm26Bits) - 1) << Imm26Shift;
 static const uint32_t RegMask = Registers::Total - 1;
 
-// TODO(loongarch64) Change to syscall?
 static const uint32_t MAX_BREAK_CODE = 1024 - 1;
+// Use LoongArch BRK for wasm traps and debug breakpoints. Signal handling code
+// decodes the BRK immediate to recover the wasm trap kind.
 static const uint32_t WASM_TRAP = 6;  // BRK_OVERFLOW
 
-// TODO(loongarch64) Change to LoongArch instruction type.
 class Instruction;
 class InstReg;
 class InstImm;
@@ -426,6 +441,17 @@ enum OpcodeField {
   op_fst_s = 0xadU << 22,
   op_fld_d = 0xaeU << 22,
   op_fst_d = 0xafU << 22,
+  op_vld = 0x2c000000,
+  op_vst = 0x2c400000,
+  op_vfcmp_clt_s = 0x0c510000,
+  op_vfcmp_ceq_s = 0x0c520000,
+  op_vfcmp_cle_s = 0x0c530000,
+  op_vfcmp_cun_s = 0x0c540000,
+  op_vfcmp_cult_s = 0x0c550000,
+  op_vfcmp_cule_s = 0x0c570000,
+  op_vfcmp_cune_s = 0x0c5c0000,
+  op_vbitsel_v = 0x0d100000,
+  op_vshuf_b = 0x0d500000,
   op_bstr_w = 0x3U << 21,  // BSTRINS_W & BSTRPICK_W
   op_fmadd_s = 0x81U << 20,
   op_fmadd_d = 0x82U << 20,
@@ -528,6 +554,51 @@ enum OpcodeField {
   op_fldx_d = 0x7068U << 15,
   op_fstx_s = 0x7070U << 15,
   op_fstx_d = 0x7078U << 15,
+  op_vldx = 0x38400000,
+  op_vstx = 0x38440000,
+  op_vseq_w = 0x70010000,
+  op_vsle_w = 0x70030000,
+  op_vsle_wu = 0x70050000,
+  op_vslt_w = 0x70070000,
+  op_vslt_wu = 0x70090000,
+  op_vadd_w = 0x700b0000,
+  op_vsub_w = 0x700d0000,
+  op_vmax_w = 0x70710000,
+  op_vmin_w = 0x70730000,
+  op_vmax_wu = 0x70750000,
+  op_vmin_wu = 0x70770000,
+  op_vmul_w = 0x70850000,
+  op_vsll_w = 0x70e90000,
+  op_vsrl_w = 0x70eb0000,
+  op_vsra_w = 0x70ed0000,
+  op_vilvl_w = 0x711b0000,
+  op_vilvh_w = 0x711d0000,
+  op_vand_v = 0x71260000,
+  op_vor_v = 0x71268000,
+  op_vxor_v = 0x71270000,
+  op_vnor_v = 0x71278000,
+  op_vandn_v = 0x71280000,
+  op_vfadd_s = 0x71308000,
+  op_vfsub_s = 0x71328000,
+  op_vfmul_s = 0x71388000,
+  op_vfmax_s = 0x713c8000,
+  op_vfmin_s = 0x713e8000,
+  op_vneg_w = 0x729c3800,
+  op_vfsqrt_s = 0x729ce400,
+  op_vfrecip_s = 0x729cf400,
+  op_vfrsqrt_s = 0x729d0400,
+  op_vfrint_s = 0x729d3400,
+  op_vffint_s_w = 0x729e0000,
+  op_vftint_w_s = 0x729e3000,
+  op_vreplgr2vr_w = 0x729f0800,
+  op_vreplvei_w = 0x72f7e000,
+  op_vinsgr2vr_w = 0x72ebe000,
+  op_vpickve2gr_w = 0x72efe000,
+  op_vpickve2gr_wu = 0x72f3e000,
+  op_vslli_w = 0x732c8000,
+  op_vsrli_w = 0x73308000,
+  op_vsrai_w = 0x73348000,
+  op_vldi = 0x73e00000,
   op_amswap_w = 0x70c0U << 15,
   op_amswap_d = 0x70c1U << 15,
   op_amadd_w = 0x70c2U << 15,
@@ -864,7 +935,8 @@ class LOONGBufferWithExecutableCopy : public LOONGBuffer {
 
 class AssemblerLOONGARCH64 : public AssemblerShared {
  public:
-  // TODO(loongarch64): Should we remove these conditions here?
+  // Keep the shared condition vocabulary so shared MacroAssembler and
+  // CodeGenerator code can lower comparisons without per-use remapping.
   enum Condition {
     Equal,
     NotEqual,
@@ -1249,6 +1321,26 @@ class AssemblerLOONGARCH64 : public AssemblerShared {
   BufferOffset as_st_h(Register rd, Register rj, int32_t si12);
   BufferOffset as_st_w(Register rd, Register rj, int32_t si12);
   BufferOffset as_st_d(Register rd, Register rj, int32_t si12);
+  BufferOffset as_vld(FloatRegister vd, Register rj, int32_t si12);
+  BufferOffset as_vst(FloatRegister vd, Register rj, int32_t si12);
+  BufferOffset as_vfcmp_clt_s(FloatRegister vd, FloatRegister vj,
+                              FloatRegister vk);
+  BufferOffset as_vfcmp_ceq_s(FloatRegister vd, FloatRegister vj,
+                              FloatRegister vk);
+  BufferOffset as_vfcmp_cle_s(FloatRegister vd, FloatRegister vj,
+                              FloatRegister vk);
+  BufferOffset as_vfcmp_cun_s(FloatRegister vd, FloatRegister vj,
+                              FloatRegister vk);
+  BufferOffset as_vfcmp_cult_s(FloatRegister vd, FloatRegister vj,
+                               FloatRegister vk);
+  BufferOffset as_vfcmp_cule_s(FloatRegister vd, FloatRegister vj,
+                               FloatRegister vk);
+  BufferOffset as_vfcmp_cune_s(FloatRegister vd, FloatRegister vj,
+                               FloatRegister vk);
+  BufferOffset as_vbitsel_v(FloatRegister vd, FloatRegister vj,
+                            FloatRegister vk, FloatRegister va);
+  BufferOffset as_vshuf_b(FloatRegister vd, FloatRegister vj, FloatRegister vk,
+                          FloatRegister va);
 
   BufferOffset as_ldx_b(Register rd, Register rj, Register rk);
   BufferOffset as_ldx_h(Register rd, Register rj, Register rk);
@@ -1261,6 +1353,51 @@ class AssemblerLOONGARCH64 : public AssemblerShared {
   BufferOffset as_stx_h(Register rd, Register rj, Register rk);
   BufferOffset as_stx_w(Register rd, Register rj, Register rk);
   BufferOffset as_stx_d(Register rd, Register rj, Register rk);
+  BufferOffset as_vldx(FloatRegister vd, Register rj, Register rk);
+  BufferOffset as_vstx(FloatRegister vd, Register rj, Register rk);
+  BufferOffset as_vseq_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsle_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsle_wu(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vslt_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vslt_wu(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vadd_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsub_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vmax_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vmin_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vmax_wu(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vmin_wu(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vmul_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsll_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsrl_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vsra_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vilvl_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vilvh_w(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vand_v(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vor_v(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vxor_v(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vnor_v(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vandn_v(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vfadd_s(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vfsub_s(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vfmul_s(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vfmax_s(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vfmin_s(FloatRegister vd, FloatRegister vj, FloatRegister vk);
+  BufferOffset as_vneg_w(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vfsqrt_s(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vfrecip_s(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vfrsqrt_s(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vfrint_s(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vffint_s_w(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vftint_w_s(FloatRegister vd, FloatRegister vj);
+  BufferOffset as_vreplgr2vr_w(FloatRegister vd, Register rj);
+  BufferOffset as_vreplvei_w(FloatRegister vd, FloatRegister vj, uint32_t lane);
+  BufferOffset as_vinsgr2vr_w(FloatRegister vd, Register rj, uint32_t lane);
+  BufferOffset as_vpickve2gr_w(Register rd, FloatRegister vj, uint32_t lane);
+  BufferOffset as_vpickve2gr_wu(Register rd, FloatRegister vj, uint32_t lane);
+  BufferOffset as_vslli_w(FloatRegister vd, FloatRegister vj, uint32_t imm);
+  BufferOffset as_vsrli_w(FloatRegister vd, FloatRegister vj, uint32_t imm);
+  BufferOffset as_vsrai_w(FloatRegister vd, FloatRegister vj, uint32_t imm);
+  BufferOffset as_vldi(FloatRegister vd, int32_t imm);
 
   BufferOffset as_ldptr_w(Register rd, Register rj, int32_t si14);
   BufferOffset as_ldptr_d(Register rd, Register rj, int32_t si14);
@@ -1477,7 +1614,7 @@ class AssemblerLOONGARCH64 : public AssemblerShared {
     return false;
 #endif
   }
-  static bool SupportsSimd() { return false; }
+  static bool SupportsSimd() { return true; }
   static bool SupportsUnalignedAccesses() { return true; }
   static bool SupportsFastUnalignedFPAccesses() { return true; }
 

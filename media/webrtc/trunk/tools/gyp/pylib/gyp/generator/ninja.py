@@ -579,9 +579,6 @@ class NinjaWriter(object):
     if 'sources' in spec and self.flavor == 'win':
       outputs += self.WriteWinIdlFiles(spec, prebuild)
 
-    if self.xcode_settings and self.xcode_settings.IsIosFramework():
-      self.WriteiOSFrameworkHeaders(spec, outputs, prebuild)
-
     stamp = self.WriteCollapsedDependencies('actions_rules_copies', outputs)
 
     if self.is_mac_bundle:
@@ -790,21 +787,6 @@ class NinjaWriter(object):
             mac_bundle_depends.append(dst)
 
     return outputs
-
-  def WriteiOSFrameworkHeaders(self, spec, outputs, prebuild):
-    """Prebuild steps to generate hmap files and copy headers to destination."""
-    framework = self.ComputeMacBundleOutput()
-    all_sources = spec['sources']
-    copy_headers = spec['mac_framework_headers']
-    output = self.GypPathToUniqueOutput('headers.hmap')
-    self.xcode_settings.header_map_path = output
-    all_headers = map(self.GypPathToNinja,
-                      filter(lambda x:x.endswith(('.h')), all_sources))
-    variables = [('framework', framework),
-                 ('copy_headers', map(self.GypPathToNinja, copy_headers))]
-    outputs.extend(self.ninja.build(
-        output, 'compile_ios_framework_headers', all_headers,
-        variables=variables, order_only=prebuild))
 
   def WriteMacBundleResources(self, resources, bundle_depends):
     """Writes ninja edges for 'mac_bundle_resources'."""
@@ -1385,13 +1367,9 @@ class NinjaWriter(object):
     self.AppendPostbuildVariable(variables, spec, output, self.target.binary,
                                  is_command_start=not package_framework)
     if package_framework and not is_empty:
-      if spec['type'] == 'shared_library' and self.xcode_settings.isIOS:
-        self.ninja.build(output, 'package_ios_framework', mac_bundle_depends,
-                         variables=variables)
-      else:
-        variables.append(('version', self.xcode_settings.GetFrameworkVersion()))
-        self.ninja.build(output, 'package_framework', mac_bundle_depends,
-                         variables=variables)
+      variables.append(('version', self.xcode_settings.GetFrameworkVersion()))
+      self.ninja.build(output, 'package_framework', mac_bundle_depends,
+                       variables=variables)
     else:
       self.ninja.build(output, 'stamp', mac_bundle_depends,
                        variables=variables)
@@ -1701,10 +1679,7 @@ def CalculateVariables(default_variables, params):
 
     gyp.msvs_emulation.CalculateCommonVariables(default_variables, params)
   else:
-    operating_system = flavor
-    if flavor == 'android':
-      operating_system = 'linux'  # Keep this legacy behavior for now.
-    default_variables.setdefault('OS', operating_system)
+    default_variables.setdefault('OS', flavor)
     default_variables.setdefault('SHARED_LIB_SUFFIX', '.so')
     default_variables.setdefault('SHARED_LIB_DIR',
                                  os.path.join('$!PRODUCT_DIR', 'lib'))
@@ -2297,12 +2272,6 @@ def GenerateOutputForConfig(target_list, target_dicts, data, params,
       description='COMPILE XCASSETS $in',
       command='$env ./gyp-mac-tool compile-xcassets $keys $in')
     master_ninja.rule(
-      'compile_ios_framework_headers',
-      description='COMPILE HEADER MAPS AND COPY FRAMEWORK HEADERS $in',
-      command='$env ./gyp-mac-tool compile-ios-framework-header-map $out '
-              '$framework $in && $env ./gyp-mac-tool '
-              'copy-ios-framework-headers $framework $copy_headers')
-    master_ninja.rule(
       'mac_tool',
       description='MACTOOL $mactool_cmd $in',
       command='$env ./gyp-mac-tool $mactool_cmd $in $out $binary')
@@ -2310,11 +2279,6 @@ def GenerateOutputForConfig(target_list, target_dicts, data, params,
       'package_framework',
       description='PACKAGE FRAMEWORK $out, POSTBUILDS',
       command='./gyp-mac-tool package-framework $out $version$postbuilds '
-              '&& touch $out')
-    master_ninja.rule(
-      'package_ios_framework',
-      description='PACKAGE IOS FRAMEWORK $out, POSTBUILDS',
-      command='./gyp-mac-tool package-ios-framework $out $postbuilds '
               '&& touch $out')
   if flavor == 'win':
     master_ninja.rule(
@@ -2469,10 +2433,6 @@ def CallGenerateOutputForConfig(arglist):
 
 
 def GenerateOutput(target_list, target_dicts, data, params):
-  # Update target_dicts for iOS device builds.
-  target_dicts = gyp.xcode_emulation.CloneConfigurationForDeviceAndEmulator(
-      target_dicts)
-
   user_config = params.get('generator_flags', {}).get('config', None)
   if gyp.common.GetFlavor(params) == 'win':
     target_list, target_dicts = MSVSUtil.ShardTargets(target_list, target_dicts)

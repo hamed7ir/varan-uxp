@@ -851,7 +851,7 @@ wasm::ToggleProfiling(const Code& code, const CallSite& callSite, bool enabled)
 #elif defined(JS_CODEGEN_LOONGARCH64)
     uint8_t* caller = callerRetAddr - sizeof(uint32_t);
     Instruction* callerInsn = reinterpret_cast<Instruction*>(caller);
-    MOZ_ASSERT(callerInsn->extractOpcode() == ((uint32_t)op_bl >> OpcodeShift));
+    MOZ_ASSERT(callerInsn->extractBitField(31, 26) == ((uint32_t)op_bl >> 26));
     int32_t calleeOffset =
         int32_t(reinterpret_cast<InstJump*>(callerInsn)->extractImm26Value() << 8) >> 6;
     void* callee = caller + calleeOffset;

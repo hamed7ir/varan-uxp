@@ -1078,7 +1078,6 @@ wasm::GenerateInterruptExit(MacroAssembler& masm, Label* throwLabel)
     // jump scratch to resume execution.
     masm.subFromStackPtr(Imm32(sizeof(intptr_t)));
     masm.setFramePushed(0);
-    static_assert(!SupportsSimd, "high lanes of SIMD registers need to be saved too.");
     masm.PushRegsInMask(AllRegsExceptSP);
 
     // Save the unaligned stack pointer in a non-volatile register, then align

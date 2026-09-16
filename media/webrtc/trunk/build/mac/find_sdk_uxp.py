@@ -28,7 +28,7 @@ if sys.platform == 'darwin':
                         "15.0", "15.1", "15.2", "15.4",
                         "26.0", "26.1", "26.4"]
 
-  REGEX = "^MacOSX(\d+\.\d+)\.sdk$"
+  REGEX = r"^MacOSX(\d+\.\d+)\.sdk$"
   SDK_VERSION = re.findall(REGEX, os.path.basename(SDK_PATH))
 
   if not SDK_VERSION:

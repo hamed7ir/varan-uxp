@@ -16,6 +16,11 @@
 namespace js {
 namespace jit {
 
+static uint32_t CountPhysBits(FloatRegisters::SetType bits) {
+  MOZ_ASSERT((bits & ~FloatRegisters::AllPhysMask) == 0);
+  return mozilla::CountPopulation32(uint32_t(bits));
+}
+
 Registers::Code Registers::FromName(const char* name) {
   for (size_t i = 0; i < TotalPhys; i++) {
     if (strcmp(GetName(i), name) == 0) {
@@ -37,43 +42,47 @@ FloatRegisters::Code FloatRegisters::FromName(const char* name) {
 }
 
 FloatRegisterSet FloatRegister::ReduceSetForPush(const FloatRegisterSet& s) {
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
+  SetType bits = s.bits();
 
-  LiveFloatRegisterSet ret;
-  for (FloatRegisterIterator iter(s); iter.more(); ++iter) {
-    ret.addUnchecked(FromCode((*iter).encoding()));
-  }
-  return ret.set();
+  // Exclude registers already represented by a wider alias. Higher alias banks
+  // are wider, so preserve only the widest live view of each physical register.
+  bits &= ~(bits >> (1 * FloatRegisters::TotalPhys));
+  bits &= ~(bits >> (2 * FloatRegisters::TotalPhys));
+
+  return FloatRegisterSet(bits);
 }
 
 uint32_t FloatRegister::GetSizeInBytes(const FloatRegisterSet& s) {
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
-
-  return s.size() * sizeof(double);
+  return s.size() * sizeof(FloatRegisters::RegisterContent);
 }
 
 uint32_t FloatRegister::GetPushSizeInBytes(const FloatRegisterSet& s) {
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
+  SetType all = s.bits();
+  SetType set128b =
+      (all >> (uint32_t(FloatRegisters::Simd128) * FloatRegisters::TotalPhys)) &
+      FloatRegisters::AllPhysMask;
+  SetType doubleSet =
+      (all >> (uint32_t(FloatRegisters::Double) * FloatRegisters::TotalPhys)) &
+      FloatRegisters::AllPhysMask;
+  SetType singleSet =
+      (all >> (uint32_t(FloatRegisters::Single) * FloatRegisters::TotalPhys)) &
+      FloatRegisters::AllPhysMask;
 
-  return s.size() * sizeof(double);
+  SetType set64b = doubleSet & ~set128b;
+  SetType set32b = singleSet & ~set64b & ~set128b;
+
+  return CountPhysBits(set128b) * (4 * sizeof(int32_t)) +
+         CountPhysBits(set64b) * sizeof(double) +
+         CountPhysBits(set32b) * sizeof(float);
 }
 
 uint32_t FloatRegister::getRegisterDumpOffsetInBytes() {
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
-
-  return encoding() * sizeof(double);
+  return encoding() * sizeof(FloatRegisters::RegisterContent);
 }
 
 bool CPUFlagsHaveBeenComputed() {
-  // TODO(loongarch64): Add CPU flags support.
+  // The LoongArch64 backend does not currently gate code generation on
+  // optional CPU features.
   return true;
 }
 

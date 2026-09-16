@@ -6,6 +6,8 @@
 
 #include "jit/loongarch64/MacroAssembler-loongarch64.h"
 
+#include <cstring>
+
 #include "jsmath.h"
 
 #include "jit/Bailouts.h"
@@ -955,8 +957,13 @@ void MacroAssemblerLOONGARCH64::ma_subPtrTestOverflow(Register rd, Register rj,
 
 void MacroAssemblerLOONGARCH64::ma_subPtrTestOverflow(Register rd, Register rj,
                                                   Imm32 imm, Label* overflow) {
-  // TODO(loongarch64): Check subPtrTestOverflow
-  MOZ_ASSERT(imm.value != INT32_MIN);
+  if (imm.value == INT32_MIN) {
+    SecondScratchRegisterScope scratch2(asMasm());
+    ma_li(scratch2, imm);
+    ma_subPtrTestOverflow(rd, rj, scratch2, overflow);
+    return;
+  }
+
   ma_addPtrTestOverflow(rd, rj, Imm32(-imm.value), overflow);
 }
 
@@ -1294,10 +1301,20 @@ void MacroAssemblerLOONGARCH64::ma_cmp_set(Register rd, Register rj, ImmPtr imm,
 
 void MacroAssemblerLOONGARCH64::ma_cmp_set(Register rd, Address address, Imm32 imm,
                                        Condition c) {
-  // TODO(loongarch64): 32-bit ma_cmp_set?
   SecondScratchRegisterScope scratch2(asMasm());
-  ma_ld_w(scratch2, address);
-  ma_cmp_set(rd, Register(scratch2), imm, c);
+  switch (c) {
+    case Above:
+    case AboveOrEqual:
+    case Below:
+    case BelowOrEqual:
+      ma_ld_wu(scratch2, address);
+      ma_cmp_set(rd, Register(scratch2), ImmWord(uint32_t(imm.value)), c);
+      break;
+    default:
+      ma_ld_w(scratch2, address);
+      ma_cmp_set(rd, Register(scratch2), imm, c);
+      break;
+  }
 }
 
 void MacroAssemblerLOONGARCH64::ma_cmp_set(Register rd, Address address,
@@ -1381,6 +1398,36 @@ void MacroAssemblerLOONGARCH64::ma_fst_d(FloatRegister src, Address address) {
     MOZ_ASSERT(base != scratch);
     ma_li(scratch, Imm32(offset));
     as_fstx_d(src, base, scratch);
+  }
+}
+
+void MacroAssemblerLOONGARCH64::ma_vld(FloatRegister dest, Address address) {
+  MOZ_ASSERT(dest.isSimd128());
+  int32_t offset = address.offset;
+  Register base = address.base;
+
+  if (is_intN(offset, 12)) {
+    as_vld(dest, base, offset);
+  } else {
+    ScratchRegisterScope scratch(asMasm());
+    MOZ_ASSERT(base != scratch);
+    ma_li(scratch, Imm32(offset));
+    as_vldx(dest, base, scratch);
+  }
+}
+
+void MacroAssemblerLOONGARCH64::ma_vst(FloatRegister src, Address address) {
+  MOZ_ASSERT(src.isSimd128());
+  int32_t offset = address.offset;
+  Register base = address.base;
+
+  if (is_intN(offset, 12)) {
+    as_vst(src, base, offset);
+  } else {
+    ScratchRegisterScope scratch(asMasm());
+    MOZ_ASSERT(base != scratch);
+    ma_li(scratch, Imm32(offset));
+    as_vstx(src, base, scratch);
   }
 }
 
@@ -1847,12 +1894,19 @@ void MacroAssemblerLOONGARCH64::storeUnalignedFloat32(
 }
 
 // Branches when done from within loongarch-specific code.
-// TODO(loongarch64) Optimize ma_b
 void MacroAssemblerLOONGARCH64::ma_b(Register lhs, Register rhs, Label* label,
                                  Condition c, JumpKind jumpKind) {
   switch (c) {
     case Equal:
     case NotEqual:
+    case Above:
+    case AboveOrEqual:
+    case Below:
+    case BelowOrEqual:
+    case GreaterThan:
+    case GreaterThanOrEqual:
+    case LessThan:
+    case LessThanOrEqual:
       asMasm().branchWithCode(getBranchCode(lhs, rhs, c), label, jumpKind);
       break;
     case Always:
@@ -1865,12 +1919,8 @@ void MacroAssemblerLOONGARCH64::ma_b(Register lhs, Register rhs, Label* label,
       MOZ_ASSERT(lhs == rhs);
       asMasm().branchWithCode(getBranchCode(lhs, c), label, jumpKind);
       break;
-    default: {
-      Condition cond = ma_cmp(ScratchRegister, lhs, rhs, c);
-      asMasm().branchWithCode(getBranchCode(ScratchRegister, cond), label,
-                              jumpKind);
-      break;
-    }
+    default:
+      MOZ_CRASH("Invalid condition.");
   }
 }
 
@@ -2046,6 +2096,12 @@ void MacroAssemblerLOONGARCH64::ma_fst_s(FloatRegister ft, BaseIndex address) {
   asMasm().ma_fst_s(ft, Address(scratch2, address.offset));
 }
 
+void MacroAssemblerLOONGARCH64::ma_vst(FloatRegister ft, BaseIndex address) {
+  SecondScratchRegisterScope scratch2(asMasm());
+  asMasm().computeScaledAddress(address, scratch2);
+  asMasm().ma_vst(ft, Address(scratch2, address.offset));
+}
+
 void MacroAssemblerLOONGARCH64::ma_fld_d(FloatRegister ft, const BaseIndex& src) {
   SecondScratchRegisterScope scratch2(asMasm());
   asMasm().computeScaledAddress(src, scratch2);
@@ -2056,6 +2112,12 @@ void MacroAssemblerLOONGARCH64::ma_fld_s(FloatRegister ft, const BaseIndex& src)
   SecondScratchRegisterScope scratch2(asMasm());
   asMasm().computeScaledAddress(src, scratch2);
   asMasm().ma_fld_s(ft, Address(scratch2, src.offset));
+}
+
+void MacroAssemblerLOONGARCH64::ma_vld(FloatRegister ft, const BaseIndex& src) {
+  SecondScratchRegisterScope scratch2(asMasm());
+  asMasm().computeScaledAddress(src, scratch2);
+  asMasm().ma_vld(ft, Address(scratch2, src.offset));
 }
 
 void MacroAssemblerLOONGARCH64::ma_bc_s(FloatRegister lhs, FloatRegister rhs,
@@ -2390,12 +2452,396 @@ void MacroAssemblerLOONGARCH64::loadFloat32(const BaseIndex& src,
   asMasm().ma_fld_s(dest, src);
 }
 
+void MacroAssemblerLOONGARCH64::loadUnalignedSimd128Float(const Address& src,
+                                                          FloatRegister dest) {
+  asMasm().ma_vld(dest.asSimd128(), src);
+}
+
+void MacroAssemblerLOONGARCH64::loadUnalignedSimd128Float(const BaseIndex& src,
+                                                          FloatRegister dest) {
+  asMasm().ma_vld(dest.asSimd128(), src);
+}
+
+void MacroAssemblerLOONGARCH64::storeUnalignedSimd128Float(FloatRegister src,
+                                                           const Address& dest) {
+  asMasm().ma_vst(src.asSimd128(), dest);
+}
+
+void MacroAssemblerLOONGARCH64::storeUnalignedSimd128Float(FloatRegister src,
+                                                           const BaseIndex& dest) {
+  asMasm().ma_vst(src.asSimd128(), dest);
+}
+
+void MacroAssemblerLOONGARCH64::loadConstantSimd128Int(const SimdConstant& v,
+                                                       FloatRegister dest) {
+  uint64_t words[2];
+  memcpy(words, v.bytes(), sizeof(words));
+
+  ma_add_d(StackPointer, StackPointer, Imm32(-Simd128DataSize));
+  {
+    ScratchRegisterScope scratch(asMasm());
+    ma_li(scratch, ImmWord(words[0]));
+    ma_st_d(scratch, Address(StackPointer, 0));
+    ma_li(scratch, ImmWord(words[1]));
+    ma_st_d(scratch, Address(StackPointer, sizeof(uint64_t)));
+  }
+  loadAlignedSimd128Int(Address(StackPointer, 0), dest);
+  ma_add_d(StackPointer, StackPointer, Imm32(Simd128DataSize));
+}
+
+void MacroAssemblerLOONGARCH64::loadConstantSimd128Float(const SimdConstant& v,
+                                                         FloatRegister dest) {
+  loadConstantSimd128Int(v, dest);
+}
+
+void MacroAssemblerLOONGARCH64::moveSimd128Float(FloatRegister src,
+                                                 FloatRegister dest) {
+  src = src.asSimd128();
+  dest = dest.asSimd128();
+  if (src == dest) {
+    return;
+  }
+  as_vor_v(dest, src, src);
+}
+
+void MacroAssemblerLOONGARCH64::zeroSimd128Float(FloatRegister dest) {
+  dest = dest.asSimd128();
+  as_vxor_v(dest, dest, dest);
+}
+
+void MacroAssemblerLOONGARCH64::createInt32x4(Register lane0, Register lane1,
+                                              Register lane2, Register lane3,
+                                              FloatRegister dest) {
+  dest = dest.asSimd128();
+  as_vreplgr2vr_w(dest, lane0);
+  as_vinsgr2vr_w(dest, lane1, 1);
+  as_vinsgr2vr_w(dest, lane2, 2);
+  as_vinsgr2vr_w(dest, lane3, 3);
+}
+
+void MacroAssemblerLOONGARCH64::splatX4(Register input, FloatRegister output) {
+  as_vreplgr2vr_w(output.asSimd128(), input);
+}
+
+void MacroAssemblerLOONGARCH64::splatX4(FloatRegister input,
+                                        FloatRegister output) {
+  as_vreplvei_w(output.asSimd128(), input.asSimd128(), 0);
+}
+
+void MacroAssemblerLOONGARCH64::extractLaneInt32x4(FloatRegister input,
+                                                   Register output,
+                                                   unsigned lane) {
+  as_vpickve2gr_w(output, input.asSimd128(), lane);
+}
+
+void MacroAssemblerLOONGARCH64::extractLaneFloat32x4(FloatRegister input,
+                                                     FloatRegister output,
+                                                     unsigned lane,
+                                                     bool canonicalize) {
+  ScratchRegisterScope scratch(asMasm());
+  as_vpickve2gr_w(scratch, input.asSimd128(), lane);
+  moveToFloat32(scratch, output);
+  if (canonicalize) {
+    asMasm().canonicalizeFloat(output);
+  }
+}
+
+void MacroAssemblerLOONGARCH64::insertLaneSimdInt(FloatRegister input,
+                                                  Register value,
+                                                  FloatRegister output,
+                                                  unsigned lane,
+                                                  unsigned numLanes) {
+  MOZ_ASSERT(numLanes == 4);
+  if (input != output) {
+    moveSimd128Int(input, output);
+  }
+  as_vinsgr2vr_w(output.asSimd128(), value, lane);
+}
+
+void MacroAssemblerLOONGARCH64::insertLaneFloat32x4(FloatRegister input,
+                                                    FloatRegister value,
+                                                    FloatRegister output,
+                                                    unsigned lane) {
+  if (input != output) {
+    moveSimd128Float(input, output);
+  }
+  ScratchRegisterScope scratch(asMasm());
+  moveFromFloat32(value, scratch);
+  as_vinsgr2vr_w(output.asSimd128(), scratch, lane);
+}
+
+void MacroAssemblerLOONGARCH64::addInt32x4(FloatRegister lhs,
+                                           FloatRegister rhs,
+                                           FloatRegister dest) {
+  as_vadd_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::subInt32x4(FloatRegister lhs,
+                                           FloatRegister rhs,
+                                           FloatRegister dest) {
+  as_vsub_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::mulInt32x4(FloatRegister lhs,
+                                           FloatRegister rhs,
+                                           FloatRegister dest) {
+  as_vmul_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::minInt32x4(FloatRegister lhs,
+                                           FloatRegister rhs,
+                                           FloatRegister dest) {
+  as_vmin_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::maxInt32x4(FloatRegister lhs,
+                                           FloatRegister rhs,
+                                           FloatRegister dest) {
+  as_vmax_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::minUint32x4(FloatRegister lhs,
+                                            FloatRegister rhs,
+                                            FloatRegister dest) {
+  as_vmin_wu(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::maxUint32x4(FloatRegister lhs,
+                                            FloatRegister rhs,
+                                            FloatRegister dest) {
+  as_vmax_wu(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::negInt32x4(FloatRegister input,
+                                           FloatRegister dest) {
+  as_vneg_w(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::shiftLeftInt32x4(FloatRegister lhs,
+                                                 FloatRegister rhs,
+                                                 FloatRegister dest) {
+  as_vsll_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::shiftRightInt32x4(FloatRegister lhs,
+                                                  FloatRegister rhs,
+                                                  FloatRegister dest) {
+  as_vsra_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::unsignedShiftRightInt32x4(FloatRegister lhs,
+                                                          FloatRegister rhs,
+                                                          FloatRegister dest) {
+  as_vsrl_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::shiftLeftInt32x4(FloatRegister lhs, Imm32 rhs,
+                                                 FloatRegister dest) {
+  as_vslli_w(dest.asSimd128(), lhs.asSimd128(), rhs.value & 31);
+}
+
+void MacroAssemblerLOONGARCH64::shiftRightInt32x4(FloatRegister lhs, Imm32 rhs,
+                                                  FloatRegister dest) {
+  as_vsrai_w(dest.asSimd128(), lhs.asSimd128(), rhs.value & 31);
+}
+
+void MacroAssemblerLOONGARCH64::unsignedShiftRightInt32x4(FloatRegister lhs,
+                                                          Imm32 rhs,
+                                                          FloatRegister dest) {
+  as_vsrli_w(dest.asSimd128(), lhs.asSimd128(), rhs.value & 31);
+}
+
+void MacroAssemblerLOONGARCH64::compareInt32x4Equal(FloatRegister lhs,
+                                                    FloatRegister rhs,
+                                                    FloatRegister dest) {
+  as_vseq_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareInt32x4LessThan(FloatRegister lhs,
+                                                       FloatRegister rhs,
+                                                       FloatRegister dest) {
+  as_vslt_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareInt32x4LessThanOrEqual(
+    FloatRegister lhs, FloatRegister rhs, FloatRegister dest) {
+  as_vsle_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareUint32x4LessThan(FloatRegister lhs,
+                                                        FloatRegister rhs,
+                                                        FloatRegister dest) {
+  as_vslt_wu(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareUint32x4LessThanOrEqual(
+    FloatRegister lhs, FloatRegister rhs, FloatRegister dest) {
+  as_vsle_wu(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::addFloat32x4(FloatRegister lhs,
+                                             FloatRegister rhs,
+                                             FloatRegister dest) {
+  as_vfadd_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::subFloat32x4(FloatRegister lhs,
+                                             FloatRegister rhs,
+                                             FloatRegister dest) {
+  as_vfsub_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::mulFloat32x4(FloatRegister lhs,
+                                             FloatRegister rhs,
+                                             FloatRegister dest) {
+  as_vfmul_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::minFloat32x4(FloatRegister lhs,
+                                             FloatRegister rhs,
+                                             FloatRegister dest) {
+  as_vfmin_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::maxFloat32x4(FloatRegister lhs,
+                                             FloatRegister rhs,
+                                             FloatRegister dest) {
+  as_vfmax_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::sqrtFloat32x4(FloatRegister input,
+                                              FloatRegister dest) {
+  as_vfsqrt_s(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::reciprocalApproximationFloat32x4(
+    FloatRegister input, FloatRegister dest) {
+  as_vfrecip_s(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::reciprocalSqrtApproximationFloat32x4(
+    FloatRegister input, FloatRegister dest) {
+  as_vfrsqrt_s(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::roundFloat32x4(FloatRegister input,
+                                               FloatRegister dest) {
+  as_vfrint_s(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::convertInt32x4ToFloat32x4(FloatRegister input,
+                                                          FloatRegister dest) {
+  as_vffint_s_w(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::convertFloat32x4ToInt32x4(FloatRegister input,
+                                                          FloatRegister dest) {
+  as_vftint_w_s(dest.asSimd128(), input.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4Equal(FloatRegister lhs,
+                                                      FloatRegister rhs,
+                                                      FloatRegister dest) {
+  as_vfcmp_ceq_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4NotEqual(FloatRegister lhs,
+                                                         FloatRegister rhs,
+                                                         FloatRegister dest) {
+  as_vfcmp_cune_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4LessThan(FloatRegister lhs,
+                                                         FloatRegister rhs,
+                                                         FloatRegister dest) {
+  as_vfcmp_clt_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4LessThanOrEqual(
+    FloatRegister lhs, FloatRegister rhs, FloatRegister dest) {
+  as_vfcmp_cle_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4Unordered(FloatRegister lhs,
+                                                          FloatRegister rhs,
+                                                          FloatRegister dest) {
+  as_vfcmp_cun_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4UnorderedLessThan(
+    FloatRegister lhs, FloatRegister rhs, FloatRegister dest) {
+  as_vfcmp_cult_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::compareFloat32x4UnorderedLessThanOrEqual(
+    FloatRegister lhs, FloatRegister rhs, FloatRegister dest) {
+  as_vfcmp_cule_s(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::interleaveLowInt32x4(FloatRegister lhs,
+                                                     FloatRegister rhs,
+                                                     FloatRegister dest) {
+  as_vilvl_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::interleaveHighInt32x4(FloatRegister lhs,
+                                                      FloatRegister rhs,
+                                                      FloatRegister dest) {
+  as_vilvh_w(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitselectSimd128(FloatRegister mask,
+                                                 FloatRegister onTrue,
+                                                 FloatRegister onFalse,
+                                                 FloatRegister dest) {
+  as_vbitsel_v(dest.asSimd128(), onFalse.asSimd128(), onTrue.asSimd128(),
+               mask.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::shuffleBytesSimd128(FloatRegister lhs,
+                                                    FloatRegister rhs,
+                                                    FloatRegister control,
+                                                    FloatRegister dest) {
+  as_vshuf_b(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128(),
+             control.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitwiseAndSimd128(FloatRegister lhs,
+                                                  FloatRegister rhs,
+                                                  FloatRegister dest) {
+  as_vand_v(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitwiseOrSimd128(FloatRegister lhs,
+                                                 FloatRegister rhs,
+                                                 FloatRegister dest) {
+  as_vor_v(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitwiseXorSimd128(FloatRegister lhs,
+                                                  FloatRegister rhs,
+                                                  FloatRegister dest) {
+  as_vxor_v(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitwiseNorSimd128(FloatRegister lhs,
+                                                  FloatRegister rhs,
+                                                  FloatRegister dest) {
+  as_vnor_v(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
+void MacroAssemblerLOONGARCH64::bitwiseAndNotSimd128(FloatRegister lhs,
+                                                     FloatRegister rhs,
+                                                     FloatRegister dest) {
+  as_vandn_v(dest.asSimd128(), lhs.asSimd128(), rhs.asSimd128());
+}
+
 void MacroAssemblerLOONGARCH64::wasmLoadImpl(const wasm::MemoryAccessDesc& access,
                                          Register memoryBase, Register ptr,
                                          Register ptrScratch,
                                          AnyRegister output, Register tmp) {
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
+  MOZ_ASSERT(offset < wasm::OffsetGuardLimit);
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.
@@ -2442,7 +2888,7 @@ void MacroAssemblerLOONGARCH64::wasmStoreImpl(const wasm::MemoryAccessDesc& acce
                                           Register memoryBase, Register ptr,
                                           Register ptrScratch, Register tmp) {
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
+  MOZ_ASSERT(offset < wasm::OffsetGuardLimit);
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.
@@ -2488,7 +2934,7 @@ void MacroAssemblerLOONGARCH64Compat::wasmLoadI64Impl(
     const wasm::MemoryAccessDesc& access, Register memoryBase, Register ptr,
     Register ptrScratch, Register64 output, Register tmp) {
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
+  MOZ_ASSERT(offset < wasm::OffsetGuardLimit);
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.
@@ -2516,7 +2962,8 @@ void MacroAssemblerLOONGARCH64Compat::wasmLoadI64Impl(
       as_ldx_w(output.reg, memoryBase, ptr);
       break;
     case Scalar::Uint32:
-      // TODO(loongarch64): Why need zero-extension here?
+      // Uint32 loads must clear the upper 32 bits before the value is consumed
+      // by 64-bit wasm operations.
       as_ldx_wu(output.reg, memoryBase, ptr);
       break;
     case Scalar::Int64:
@@ -2534,7 +2981,7 @@ void MacroAssemblerLOONGARCH64Compat::wasmStoreI64Impl(
     const wasm::MemoryAccessDesc& access, Register64 value, Register memoryBase,
     Register ptr, Register ptrScratch, Register tmp) {
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
+  MOZ_ASSERT(offset < wasm::OffsetGuardLimit);
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.
@@ -2617,14 +3064,18 @@ void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
     storePtr(*iter, Address(StackPointer, diff));
   }
 
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
-
   for (FloatRegisterBackwardIterator iter(set.fpus().reduceSetForPush());
        iter.more(); ++iter) {
-    diff -= sizeof(double);
-    storeDouble(*iter, Address(StackPointer, diff));
+    FloatRegister reg = *iter;
+    diff -= reg.size();
+    if (reg.isSingle()) {
+      storeFloat32(reg, Address(StackPointer, diff));
+    } else if (reg.isSimd128()) {
+      storeUnalignedSimd128Float(reg, Address(StackPointer, diff));
+    } else {
+      MOZ_ASSERT(reg.isDouble());
+      storeDouble(reg, Address(StackPointer, diff));
+    }
   }
   MOZ_ASSERT(diff == 0);
 }
@@ -2642,15 +3093,19 @@ void MacroAssembler::PopRegsInMaskIgnore(LiveRegisterSet set,
     }
   }
 
-#ifdef ENABLE_WASM_SIMD
-#  error "Needs more careful logic if SIMD is enabled"
-#endif
-
   for (FloatRegisterBackwardIterator iter(set.fpus().reduceSetForPush());
        iter.more(); ++iter) {
-    diff -= sizeof(double);
+    FloatRegister reg = *iter;
+    diff -= reg.size();
     if (!ignore.has(*iter)) {
-      loadDouble(Address(StackPointer, diff), *iter);
+      if (reg.isSingle()) {
+        loadFloat32(Address(StackPointer, diff), reg);
+      } else if (reg.isSimd128()) {
+        loadUnalignedSimd128Float(Address(StackPointer, diff), reg);
+      } else {
+        MOZ_ASSERT(reg.isDouble());
+        loadDouble(Address(StackPointer, diff), reg);
+      }
     }
   }
   MOZ_ASSERT(diff == 0);
@@ -2774,12 +3229,13 @@ CodeOffset MacroAssembler::nopPatchableToNearJump() {
 }
 
 void MacroAssembler::patchNopToNearJump(uint8_t* jump, uint8_t* target) {
-  MOZ_ASSERT(reinterpret_cast<Instruction*>(jump)->is<InstNOP>());
+  MOZ_ASSERT(reinterpret_cast<Instruction*>(jump)->encode() == NopInst);
   new (jump) InstJump(op_b, JOffImm26(target - jump));
 }
 
 void MacroAssembler::patchNearJumpToNop(uint8_t* jump) {
-  MOZ_ASSERT(reinterpret_cast<Instruction*>(jump)->is<InstJump>());
+  MOZ_ASSERT(reinterpret_cast<Instruction*>(jump)->extractBitField(31, 26) ==
+             (uint32_t)op_b >> 26);
   new (jump) InstNOP();
 }
 

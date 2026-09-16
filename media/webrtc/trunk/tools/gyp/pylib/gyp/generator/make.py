@@ -91,8 +91,6 @@ def CalculateVariables(default_variables, params):
     COMPILABLE_EXTENSIONS.update({'.m': 'objc', '.mm' : 'objcxx'})
   else:
     operating_system = flavor
-    if flavor == 'android':
-      operating_system = 'linux'  # Keep this legacy behavior for now.
     default_variables.setdefault('OS', operating_system)
     if flavor == 'aix':
       default_variables.setdefault('SHARED_LIB_SUFFIX', '.a')
@@ -105,13 +103,6 @@ def CalculateVariables(default_variables, params):
 def CalculateGeneratorInputInfo(params):
   """Calculate the generator specific info that gets fed to input (called by
   gyp)."""
-  generator_flags = params.get('generator_flags', {})
-  android_ndk_version = generator_flags.get('android_ndk_version', None)
-  # Android NDK requires a strict link order.
-  if android_ndk_version:
-    global generator_wants_sorted_dependencies
-    generator_wants_sorted_dependencies = True
-
   output_dir = params['options'].generator_output or \
                params['options'].toplevel_dir
   builddir_name = generator_flags.get('output_dir', 'out')
@@ -187,34 +178,6 @@ cmd_solink = $(LINK.$(TOOLSET)) -shared $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o 
 quiet_cmd_solink_module = SOLINK_MODULE($(TOOLSET)) $@
 cmd_solink_module = $(LINK.$(TOOLSET)) -bundle $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(filter-out FORCE_DO_CMD, $^) $(LIBS)
 """
-
-LINK_COMMANDS_ANDROID = """\
-quiet_cmd_alink = AR($(TOOLSET)) $@
-cmd_alink = rm -f $@ && $(AR.$(TOOLSET)) crs $@ $(filter %.o,$^)
-
-quiet_cmd_alink_thin = AR($(TOOLSET)) $@
-cmd_alink_thin = rm -f $@ && $(AR.$(TOOLSET)) crsT $@ $(filter %.o,$^)
-
-# Due to circular dependencies between libraries :(, we wrap the
-# special "figure out circular dependencies" flags around the entire
-# input list during linking.
-quiet_cmd_link = LINK($(TOOLSET)) $@
-quiet_cmd_link_host = LINK($(TOOLSET)) $@
-cmd_link = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ -Wl,--start-group $(LD_INPUTS) -Wl,--end-group $(LIBS)
-cmd_link_host = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(LD_INPUTS) $(LIBS)
-
-# Other shared-object link notes:
-# - Set SONAME to the library filename so our binaries don't reference
-# the local, absolute paths used on the link command-line.
-quiet_cmd_solink = SOLINK($(TOOLSET)) $@
-cmd_solink = $(LINK.$(TOOLSET)) -shared $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -Wl,-soname=$(@F) -o $@ -Wl,--whole-archive $(LD_INPUTS) -Wl,--no-whole-archive $(LIBS)
-
-quiet_cmd_solink_module = SOLINK_MODULE($(TOOLSET)) $@
-cmd_solink_module = $(LINK.$(TOOLSET)) -shared $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -Wl,-soname=$(@F) -o $@ -Wl,--start-group $(filter-out FORCE_DO_CMD, $^) -Wl,--end-group $(LIBS)
-quiet_cmd_solink_module_host = SOLINK_MODULE($(TOOLSET)) $@
-cmd_solink_module_host = $(LINK.$(TOOLSET)) -shared $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -Wl,-soname=$(@F) -o $@ $(filter-out FORCE_DO_CMD, $^) $(LIBS)
-"""
-
 
 LINK_COMMANDS_AIX = """\
 quiet_cmd_alink = AR($(TOOLSET)) $@
@@ -847,11 +810,6 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
     # Update global list of link dependencies.
     if self.type in ('static_library', 'shared_library'):
       target_link_deps[qualified_target] = self.output_binary
-
-    # Currently any versions have the same effect, but in future the behavior
-    # could be different.
-    if self.generator_flags.get('android_ndk_version', None):
-      self.WriteAndroidNdkModuleRule(self.target, all_sources, link_deps)
 
     self.fp.close()
 
@@ -1596,12 +1554,8 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
       self.WriteLn('%s: LD_INPUTS := %s' % (
           QuoteSpaces(self.output_binary),
           ' '.join(map(QuoteSpaces, link_deps))))
-      if self.toolset == 'host' and self.flavor == 'android':
-        self.WriteDoCmd([self.output_binary], link_deps, 'link_host',
-                        part_of_all, postbuilds=postbuilds)
-      else:
-        self.WriteDoCmd([self.output_binary], link_deps, 'link', part_of_all,
-                        postbuilds=postbuilds)
+      self.WriteDoCmd([self.output_binary], link_deps, 'link', part_of_all,
+                      postbuilds=postbuilds)
 
     elif self.type == 'static_library':
       for link_dep in link_deps:
@@ -1624,13 +1578,9 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
       for link_dep in link_deps:
         assert ' ' not in link_dep, (
             "Spaces in module input filenames not supported (%s)"  % link_dep)
-      if self.toolset == 'host' and self.flavor == 'android':
-        self.WriteDoCmd([self.output_binary], link_deps, 'solink_module_host',
-                        part_of_all, postbuilds=postbuilds)
-      else:
-        self.WriteDoCmd(
-            [self.output_binary], link_deps, 'solink_module', part_of_all,
-            postbuilds=postbuilds)
+      self.WriteDoCmd(
+          [self.output_binary], link_deps, 'solink_module', part_of_all,
+          postbuilds=postbuilds)
     elif self.type == 'none':
       # Write a stamp line.
       self.WriteDoCmd([self.output_binary], deps, 'touch', part_of_all,
@@ -1788,90 +1738,6 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
         self.WriteLn('\t%s' % action)
     self.WriteLn()
 
-
-  def WriteAndroidNdkModuleRule(self, module_name, all_sources, link_deps):
-    """Write a set of LOCAL_XXX definitions for Android NDK.
-
-    These variable definitions will be used by Android NDK but do nothing for
-    non-Android applications.
-
-    Arguments:
-      module_name: Android NDK module name, which must be unique among all
-          module names.
-      all_sources: A list of source files (will be filtered by Compilable).
-      link_deps: A list of link dependencies, which must be sorted in
-          the order from dependencies to dependents.
-    """
-    if self.type not in ('executable', 'shared_library', 'static_library'):
-      return
-
-    self.WriteLn('# Variable definitions for Android applications')
-    self.WriteLn('include $(CLEAR_VARS)')
-    self.WriteLn('LOCAL_MODULE := ' + module_name)
-    self.WriteLn('LOCAL_CFLAGS := $(CFLAGS_$(BUILDTYPE)) '
-                 '$(DEFS_$(BUILDTYPE)) '
-                 # LOCAL_CFLAGS is applied to both of C and C++.  There is
-                 # no way to specify $(CFLAGS_C_$(BUILDTYPE)) only for C
-                 # sources.
-                 '$(CFLAGS_C_$(BUILDTYPE)) '
-                 # $(INCS_$(BUILDTYPE)) includes the prefix '-I' while
-                 # LOCAL_C_INCLUDES does not expect it.  So put it in
-                 # LOCAL_CFLAGS.
-                 '$(INCS_$(BUILDTYPE))')
-    # LOCAL_CXXFLAGS is obsolete and LOCAL_CPPFLAGS is preferred.
-    self.WriteLn('LOCAL_CPPFLAGS := $(CFLAGS_CC_$(BUILDTYPE))')
-    self.WriteLn('LOCAL_C_INCLUDES :=')
-    self.WriteLn('LOCAL_LDLIBS := $(LDFLAGS_$(BUILDTYPE)) $(LIBS)')
-
-    # Detect the C++ extension.
-    cpp_ext = {'.cc': 0, '.cpp': 0, '.cxx': 0}
-    default_cpp_ext = '.cpp'
-    for filename in all_sources:
-      ext = os.path.splitext(filename)[1]
-      if ext in cpp_ext:
-        cpp_ext[ext] += 1
-        if cpp_ext[ext] > cpp_ext[default_cpp_ext]:
-          default_cpp_ext = ext
-    self.WriteLn('LOCAL_CPP_EXTENSION := ' + default_cpp_ext)
-
-    self.WriteList(map(self.Absolutify, filter(Compilable, all_sources)),
-                   'LOCAL_SRC_FILES')
-
-    # Filter out those which do not match prefix and suffix and produce
-    # the resulting list without prefix and suffix.
-    def DepsToModules(deps, prefix, suffix):
-      modules = []
-      for filepath in deps:
-        filename = os.path.basename(filepath)
-        if filename.startswith(prefix) and filename.endswith(suffix):
-          modules.append(filename[len(prefix):-len(suffix)])
-      return modules
-
-    # Retrieve the default value of 'SHARED_LIB_SUFFIX'
-    params = {'flavor': 'linux'}
-    default_variables = {}
-    CalculateVariables(default_variables, params)
-
-    self.WriteList(
-        DepsToModules(link_deps,
-                      generator_default_variables['SHARED_LIB_PREFIX'],
-                      default_variables['SHARED_LIB_SUFFIX']),
-        'LOCAL_SHARED_LIBRARIES')
-    self.WriteList(
-        DepsToModules(link_deps,
-                      generator_default_variables['STATIC_LIB_PREFIX'],
-                      generator_default_variables['STATIC_LIB_SUFFIX']),
-        'LOCAL_STATIC_LIBRARIES')
-
-    if self.type == 'executable':
-      self.WriteLn('include $(BUILD_EXECUTABLE)')
-    elif self.type == 'shared_library':
-      self.WriteLn('include $(BUILD_SHARED_LIBRARY)')
-    elif self.type == 'static_library':
-      self.WriteLn('include $(BUILD_STATIC_LIBRARY)')
-    self.WriteLn()
-
-
   def WriteLn(self, text=''):
     self.fp.write(text + '\n')
 
@@ -1998,7 +1864,6 @@ def GenerateOutput(target_list, target_dicts, data, params):
   flavor = gyp.common.GetFlavor(params)
   generator_flags = params.get('generator_flags', {})
   builddir_name = generator_flags.get('output_dir', 'out')
-  android_ndk_version = generator_flags.get('android_ndk_version', None)
   default_target = generator_flags.get('default_target', 'all')
 
   def CalculateMakefilePath(build_file, base_name):
@@ -2063,10 +1928,6 @@ def GenerateOutput(target_list, target_dicts, data, params):
         'flock_index': 2,
         'link_commands': LINK_COMMANDS_MAC,
         'extra_commands': SHARED_HEADER_MAC_COMMANDS,
-    })
-  elif flavor == 'android':
-    header_params.update({
-        'link_commands': LINK_COMMANDS_ANDROID,
     })
   elif flavor == 'zos':
     copy_archive_arguments = '-fPR'
@@ -2146,13 +2007,6 @@ def GenerateOutput(target_list, target_dicts, data, params):
   gyp.common.EnsureDirExists(makefile_path)
   root_makefile = open(makefile_path, 'w')
   root_makefile.write(SHARED_HEADER % header_params)
-  # Currently any versions have the same effect, but in future the behavior
-  # could be different.
-  if android_ndk_version:
-    root_makefile.write(
-        '# Define LOCAL_PATH for build of Android applications.\n'
-        'LOCAL_PATH := $(call my-dir)\n'
-        '\n')
   for toolset in toolsets:
     root_makefile.write('TOOLSET := %s\n' % toolset)
     WriteRootHeaderSuffixRules(root_makefile)

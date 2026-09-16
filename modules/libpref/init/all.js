@@ -1312,6 +1312,9 @@ pref("javascript.options.dynamicImport", true);
 // Streams API
 pref("javascript.options.streams", true);
 
+// WeakRefs API
+pref("javascript.options.weakrefs", true);
+
 // advanced prefs
 pref("advanced.mailftp",                    false);
 pref("image.animation_mode",                "normal");
@@ -1354,12 +1357,6 @@ pref("network.notify.IPv6", false);
 #else
 pref("network.notify.IPv6", true);
 #endif
-
-// Transmit UDP busy-work to the LAN when anticipating low latency
-// network reads and on wifi to mitigate 802.11 Power Save Polling delays
-pref("network.tickle-wifi.enabled", false);
-pref("network.tickle-wifi.duration", 400);
-pref("network.tickle-wifi.delay", 16);
 
 // Turn off interprocess security checks. Needed to run xpcshell tests.
 pref("network.disable.ipc.security", false);
@@ -2574,6 +2571,9 @@ pref("layout.css.legacy-negation-pseudo.enabled", false);
 
 // Is support for the :is() and :where() selectors enabled?
 pref("layout.css.is-where-pseudo.enabled", true);
+
+// Is support for the :has() selector enabled?
+pref("layout.css.has-pseudo.enabled", true);
 
 // Is support for the ::slotted() selector enabled?
 pref("layout.css.slotted-pseudo.enabled", true);

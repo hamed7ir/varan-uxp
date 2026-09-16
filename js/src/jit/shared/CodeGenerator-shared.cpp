@@ -85,8 +85,9 @@ CodeGeneratorShared::CodeGeneratorShared(MIRGenerator* gen, LIRGraph* graph, Mac
         MOZ_ASSERT(graph->argumentSlotCount() == 0);
         frameDepth_ += gen->wasmMaxStackArgBytes();
 
-        static_assert(!SupportsSimd, "we need padding so that local slots are SIMD-aligned and "
-                                     "the stack must be kept SIMD-aligned too.");
+        if (SupportsSimd) {
+            frameDepth_ = AlignBytes(frameDepth_, SimdMemoryAlignment);
+        }
 
         if (gen->performsCall()) {
             // An MWasmCall does not align the stack pointer at calls sites but

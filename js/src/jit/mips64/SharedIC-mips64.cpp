@@ -173,6 +173,18 @@ ICUnaryArith_Int32::Compiler::generateStubCode(MacroAssembler& masm)
         masm.neg32(ExtractTemp0);
         masm.tagValue(JSVAL_TYPE_INT32, ExtractTemp0, R0);
         break;
+      case JSOP_INC: {
+        masm.unboxInt32(R0, ExtractTemp0);
+        masm.ma_addTestOverflow(ExtractTemp0, ExtractTemp0, Imm32(1), &failure);
+        masm.tagValue(JSVAL_TYPE_INT32, ExtractTemp0, R0);
+        break;
+      }
+      case JSOP_DEC: {
+        masm.unboxInt32(R0, ExtractTemp0);
+        masm.ma_subTestOverflow(ExtractTemp0, ExtractTemp0, Imm32(1), &failure);
+        masm.tagValue(JSVAL_TYPE_INT32, ExtractTemp0, R0);
+        break;
+      }
       default:
         MOZ_CRASH("Unexpected op");
         return false;

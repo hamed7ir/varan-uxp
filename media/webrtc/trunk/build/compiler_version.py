@@ -53,7 +53,7 @@ def main():
   # In ninja's cross compile mode, the CXX_target is target compiler, while
   # the CXX is host. The CXX_target needs be checked first, though the target
   # and host compiler have different version, there seems no issue to use the
-  # target compiler's version number as gcc_version in Android.
+  # target compiler's version number as gcc_version.
   cxx_version = GetVersionFromEnvironment("CXX_target")
   if cxx_version:
     print(cxx_version)

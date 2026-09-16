@@ -9,7 +9,7 @@
 {
   'includes': [ '../build/common.gypi', ],
   'conditions': [
-    ['os_posix == 1 and OS != "mac" and OS != "ios"', {
+    ['os_posix == 1 and OS != "mac"', {
       'conditions': [
         ['sysroot!=""', {
           'variables': {
@@ -165,9 +165,6 @@
         'httprequest.h',
         'httpserver.cc',
         'httpserver.h',
-        'ifaddrs-android.cc',
-        'ifaddrs-android.h',
-        'iosfilesystem.mm',
         'ipaddress.cc',
         'ipaddress.h',
         'json.cc',
@@ -555,14 +552,14 @@
               'conditions': [
                 # On some platforms, the rest of NSS is bundled. On others,
                 # it's pulled from the system.
-                ['OS == "mac" or OS == "ios" or OS == "win"', {
+                ['OS == "mac" or OS == "win"', {
                   'dependencies': [
                     '<(DEPTH)/net/third_party/nss/ssl.gyp:libssl',
                     '<(DEPTH)/third_party/nss/nss.gyp:nspr',
                     '<(DEPTH)/third_party/nss/nss.gyp:nss',
                   ],
                 }],
-                ['os_posix == 1 and OS != "mac" and OS != "ios" and OS != "android"', {
+                ['os_posix == 1 and OS != "mac"', {
                   'dependencies': [
                     '<(DEPTH)/build/linux/system.gyp:ssl',
                   ],
@@ -574,31 +571,6 @@
               ],
             }],
           ],
-        }],
-        ['OS == "android"', {
-          'link_settings': {
-            'libraries': [
-              '-llog',
-              '-lGLESv2',
-            ],
-          },
-        }, {
-          'sources!': [
-            'ifaddrs-android.cc',
-            'ifaddrs-android.h',
-          ],
-        }],
-        ['OS=="ios"', {
-          'all_dependent_settings': {
-            'xcode_settings': {
-              'OTHER_LDFLAGS': [
-                '-framework Foundation',
-                '-framework Security',
-                '-framework SystemConfiguration',
-                '-framework UIKit',
-              ],
-            },
-          },
         }],
         ['use_x11 == 1', {
           'link_settings': {
@@ -712,24 +684,24 @@
             'Debug_Base': {
               'defines': [
                 # Chromium's build/common.gypi defines this for all posix
-                # _except_ for ios & mac.  We want it there as well, e.g.
+                # except for mac. We want it there as well, e.g.
                 # because ASSERT and friends trigger off of it.
                 '_DEBUG',
               ],
             },
           }
         }],
-        ['OS=="ios" or (OS=="mac" and target_arch!="ia32")', {
+        ['OS=="mac" and target_arch!="ia32"', {
           'defines': [
             'CARBON_DEPRECATED=YES',
           ],
         }],
-        ['OS!="ios" and OS!="mac"', {
+        ['OS!="mac"', {
           'sources!': [
             'scoped_autorelease_pool.mm',
           ],
         }],
-        ['OS!="linux" and OS!="android"', {
+        ['OS!="linux"', {
           'sources!': [
             'linux.cc',
             'linux.h',

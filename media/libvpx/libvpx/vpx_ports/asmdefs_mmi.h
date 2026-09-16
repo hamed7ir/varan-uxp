@@ -16,6 +16,30 @@
 
 #if HAVE_MMI
 
+/*
+ * Clang's integrated assembler uses the prefixed spellings below, while
+ * GNU as names the same Loongson MMI instructions xor/and/or/dsrl/srl.
+ * Define GNU as aliases so the inline assembly works with either toolchain.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+__asm__(
+    ".macro pxor dst, src1, src2\n\t"
+    "xor \\dst, \\src1, \\src2\n\t"
+    ".endm\n\t"
+    ".macro pand dst, src1, src2\n\t"
+    "and \\dst, \\src1, \\src2\n\t"
+    ".endm\n\t"
+    ".macro por dst, src1, src2\n\t"
+    "or \\dst, \\src1, \\src2\n\t"
+    ".endm\n\t"
+    ".macro ssrld dst, src1, src2\n\t"
+    "dsrl \\dst, \\src1, \\src2\n\t"
+    ".endm\n\t"
+    ".macro ssrlw dst, src1, src2\n\t"
+    "srl \\dst, \\src1, \\src2\n\t"
+    ".endm\n\t");
+#endif
+
 #if HAVE_MIPS64
 #define mips_reg int64_t
 #define MMI_ADDU(reg1, reg2, reg3) \

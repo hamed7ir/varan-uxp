@@ -365,6 +365,18 @@ MacroAssembler::rshift64Arithmetic(Register shift, Register64 dest)
 // Rotation functions
 
 void
+MacroAssembler::rotateLeft64(Imm32 count, Register64 src, Register64 dest)
+{
+    rotateLeft64(count, src, dest, InvalidReg);
+}
+
+void
+MacroAssembler::rotateLeft64(Register count, Register64 src, Register64 dest)
+{
+    rotateLeft64(count, src, dest, InvalidReg);
+}
+
+void
 MacroAssembler::rotateLeft64(Imm32 count, Register64 src, Register64 dest, Register temp)
 {
     MOZ_ASSERT(temp == InvalidReg);
@@ -380,6 +392,18 @@ MacroAssembler::rotateLeft64(Register count, Register64 src, Register64 dest, Re
 {
     MOZ_ASSERT(temp == InvalidReg);
     ma_drol(dest.reg, src.reg, count);
+}
+
+void
+MacroAssembler::rotateRight64(Imm32 count, Register64 src, Register64 dest)
+{
+    rotateRight64(count, src, dest, InvalidReg);
+}
+
+void
+MacroAssembler::rotateRight64(Register count, Register64 src, Register64 dest)
+{
+    rotateRight64(count, src, dest, InvalidReg);
 }
 
 void

@@ -344,7 +344,7 @@ def split_triplet(triplet):
     if cpu.endswith('86') or (cpu.startswith('i') and '86' in cpu):
         canonical_cpu = 'x86'
         endianness = 'little'
-    elif cpu in ('x86_64', 'ia64'):
+    elif cpu == 'x86_64':
         canonical_cpu = cpu
         endianness = 'little'
     elif cpu in ('s390', 's390x'):

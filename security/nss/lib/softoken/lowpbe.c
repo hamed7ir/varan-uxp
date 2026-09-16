@@ -1209,7 +1209,13 @@ sec_pkcs5_des(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_des,
     DESContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* freebl's DES_CreateContext has no IV/key length parameters and reads
+     * fixed-size buffers, so reject undersized SECItems here before they can
+     * cause an out-of-bounds read. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) ||
+        (key->len < (unsigned int)(triple_des ? 24 : DES_KEY_LENGTH)) ||
+        (iv->data == NULL) || (iv->len < DES_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1285,7 +1291,11 @@ sec_pkcs5_aes(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_des,
     AESContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* AES_CreateContext reads AES_BLOCK_SIZE bytes of IV with no length
+     * parameter; reject undersized SECItems to prevent OOB reads. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) || (iv->data == NULL) ||
+        (iv->len < AES_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1360,7 +1370,12 @@ sec_pkcs5_aes_key_wrap(SECItem *key, SECItem *iv, SECItem *src, PRBool triple_de
     AESKeyWrapContext *ctxt;
     unsigned int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* AESKeyWrap_CreateContext reads AES_KEY_WRAP_BLOCK_SIZE bytes of IV when
+     * non-NULL; reject undersized SECItems to prevent OOB reads. A NULL
+     * iv->data is allowed and selects the default key-wrap IV. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) ||
+        (iv->data != NULL && iv->len < AES_KEY_WRAP_BLOCK_SIZE)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }
@@ -1434,7 +1449,11 @@ sec_pkcs5_rc2(SECItem *key, SECItem *iv, SECItem *src, PRBool dummy,
     SECStatus rv = SECFailure;
     int pad;
 
-    if ((src == NULL) || (key == NULL) || (iv == NULL)) {
+    /* RC2_CreateContext reads 8 bytes of IV in CBC mode with no length
+     * parameter; reject undersized SECItems to prevent OOB reads. */
+    if ((src == NULL) || (key == NULL) || (iv == NULL) ||
+        (key->data == NULL) || (iv->data == NULL) ||
+        (iv->len < 8 /* RC2_BLOCK_SIZE */)) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return NULL;
     }

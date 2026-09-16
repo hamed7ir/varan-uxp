@@ -1120,11 +1120,6 @@ class TestGypXcodeNinja(TestGypXcode):
     gyp_file.
     """
     build_config = self.configuration
-    if build_config and build_config.endswith(('-iphoneos',
-                                               '-iphonesimulator')):
-      build_config, sdk = self.configuration.split('-')
-      kw['arguments'] = kw.get('arguments', []) + ['-sdk', sdk]
-
     with self._build_configuration(build_config):
       return super(TestGypXcodeNinja, self).build(
         gyp_file.replace('.gyp', '.ninja.gyp'), target, **kw)

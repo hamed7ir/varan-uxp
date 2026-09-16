@@ -448,7 +448,6 @@ gtk/gtkx.h
 gtk/gtkunixprint.h
 HIToolbox/HIToolbox.h
 hlink.h
-ia64/sys/inline.h
 Icons.h
 iconv.h
 ieeefp.h

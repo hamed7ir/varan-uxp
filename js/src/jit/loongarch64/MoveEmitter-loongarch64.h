@@ -13,7 +13,13 @@ namespace jit {
 
 class MoveEmitterLoongArch64 : public MoveEmitterMIPSShared
 {
+    Address cycleSlot(uint32_t slot, uint32_t subslot = 0) const;
+
     void emitDoubleMove(const MoveOperand& from, const MoveOperand& to);
+    void emitSimd128IntMove(const MoveOperand& from, const MoveOperand& to);
+    void emitSimd128FloatMove(const MoveOperand& from, const MoveOperand& to);
+    void emit(const MoveOp& move);
+
     void breakCycle(const MoveOperand& from, const MoveOperand& to,
                     MoveOp::Type type, uint32_t slot);
     void completeCycle(const MoveOperand& from, const MoveOperand& to,
@@ -23,6 +29,8 @@ class MoveEmitterLoongArch64 : public MoveEmitterMIPSShared
     MoveEmitterLoongArch64(MacroAssembler& masm)
       : MoveEmitterMIPSShared(masm)
     { }
+
+    void emit(const MoveResolver& moves);
 };
 
 typedef MoveEmitterLoongArch64 MoveEmitter;

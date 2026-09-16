@@ -981,9 +981,6 @@ class LinuxCrossCompileToolchainTest(BaseToolchainTest):
         'aarch64-unknown-linux-gnu': little_endian + {
             '__aarch64__': 1,
         },
-        'ia64-unknown-linux-gnu': little_endian + {
-            '__ia64__': 1,
-        },
         's390x-unknown-linux-gnu': big_endian + {
             '__s390x__': 1,
             '__s390__': 1,

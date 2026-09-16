@@ -26,8 +26,12 @@ SOURCES += [
     'pngwutil.c'
 ]
 
-# Non-WINNT ARM (Linux/Android): upstream set = C intrinsics + the A32 filter_neon.S.
-if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['OS_TARGET'] != 'WINNT':
+# Non-WINNT ARM/AArch64 (Linux/Android): upstream set = C intrinsics + the A32
+# filter_neon.S. Upstream widened this to aarch64 in RB_20260914; that widening is
+# kept. The `!= WINNT` half is Varan's and must stay: arm/filter_neon.S is A32, which
+# is dialect-forbidden on Windows RT. Windows-on-ARM is handled by its own block below,
+# which takes the C intrinsics WITHOUT the .S.
+if CONFIG['CPU_ARCH'] in ('arm','aarch64') and CONFIG['OS_TARGET'] != 'WINNT':
     DEFINES['MOZ_PNG_USE_ARM_NEON'] = True
     SOURCES += [
         'arm/arm_init.c',
@@ -63,6 +67,15 @@ if CONFIG['INTEL_ARCHITECTURE']:
         'sse2/filter_sse2_intrinsics.c',
         'sse2/intel_init.c'
     ]
+
+if CONFIG['CPU_ARCH'] == 'loongarch64':
+    DEFINES['PNG_LOONGARCH_LSX_OPT'] = 1
+    SOURCES += [
+        'loongarch/filter_lsx_intrinsics.c',
+        'loongarch/loongarch_lsx_init.c',
+    ]
+    SOURCES['loongarch/filter_lsx_intrinsics.c'].flags += ['-mlsx']
+    SOURCES['loongarch/loongarch_lsx_init.c'].flags += ['-mlsx']
 
 Library('mozpng')
 

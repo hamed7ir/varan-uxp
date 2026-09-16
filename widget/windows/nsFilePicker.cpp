@@ -223,23 +223,27 @@ nsFilePicker::ShowFolderPicker(const nsString& aInitialDir)
 
   // results
 
-  // If the user chose a Win7 Library, resolve to the library's
-  // default save folder.
-  RefPtr<IShellItem> folderPath;
-  RefPtr<IShellLibrary> shellLib;
-  if (FAILED(CoCreateInstance(CLSID_ShellLibrary,
-                              nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_IShellLibrary,
-                              getter_AddRefs(shellLib)))) {
-    return false;
-  }
+  // If the user chose a Win7+ Library, resolve to the library's filesystem
+  // objects, like the user's Documents library (but not .library-ms files).
+  SFGAOF attrs = 0;
+  if (SUCCEEDED(item->GetAttributes(SFGAO_FILESYSTEM, &attrs)) &&
+      !(attrs & SFGAO_FILESYSTEM)) {
+    RefPtr<IShellItem> folderPath;
+    RefPtr<IShellLibrary> shellLib;
+    if (FAILED(CoCreateInstance(CLSID_ShellLibrary,
+                                nullptr,
+                                CLSCTX_INPROC_SERVER,
+                                IID_IShellLibrary,
+                                getter_AddRefs(shellLib)))) {
+      return false;
+    }
 
-  if (shellLib &&
-      SUCCEEDED(shellLib->LoadLibraryFromItem(item, STGM_READ)) &&
-      SUCCEEDED(shellLib->GetDefaultSaveFolder(DSFT_DETECT, IID_IShellItem,
-                                               getter_AddRefs(folderPath)))) {
-    item.swap(folderPath);
+    if (shellLib &&
+        SUCCEEDED(shellLib->LoadLibraryFromItem(item, STGM_READ)) &&
+        SUCCEEDED(shellLib->GetDefaultSaveFolder(DSFT_DETECT, IID_IShellItem,
+                                                 getter_AddRefs(folderPath)))) {
+      item.swap(folderPath);
+    }
   }
 
   // get the folder's file system path

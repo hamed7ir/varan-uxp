@@ -32,7 +32,7 @@ public:
   virtual SkTypeface* GetSkTypeface();
 #endif
   virtual already_AddRefed<Path> GetPathForGlyphs(const GlyphBuffer &aBuffer, const DrawTarget *aTarget);
-#if !defined(MAC_OS_X_VERSION_10_7) || (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7)
+#ifndef USE_SKIA
   virtual void CopyGlyphsToBuilder(const GlyphBuffer &aBuffer, PathBuilder *aBuilder, const Matrix *aTransformHint);
 #endif
   virtual bool GetFontFileData(FontFileDataOutput aDataCallback, void *aBaton);
