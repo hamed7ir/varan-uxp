@@ -2192,6 +2192,31 @@ SimIcount(JSContext* cx, unsigned argc, Value* vp)
     return true;
 }
 
+// Varan F3 CENSUS (POST-FABLE item 3, 2026-08-05; DIAGNOSTIC, remove with the MANIFEST
+// DIAGNOSTIC series). Counters defined in jit/arm/Simulator-arm.cpp at global scope (the
+// gVaranUdfEmitCounts precedent). Returns the formatted counter line; returns the string
+// "-1" when the build has no simulator -- same read-not-defaulted control as simIcount.
+#if defined(JS_SIMULATOR_ARM)
+void VaranCensusFormat(char* out, size_t outlen);   // defined in jit/arm/Simulator-arm.cpp
+#endif
+
+static bool
+SimCensus(JSContext* cx, unsigned argc, Value* vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+#if defined(JS_SIMULATOR_ARM)
+    char varanBuf[512];
+    ::VaranCensusFormat(varanBuf, sizeof varanBuf);
+    JSString* str = JS_NewStringCopyZ(cx, varanBuf);
+#else
+    JSString* str = JS_NewStringCopyZ(cx, "-1");
+#endif
+    if (!str)
+        return false;
+    args.rval().setString(str);
+    return true;
+}
+
 // Varan (Track A, 2026-08-01): STATIC emitted footprint of a function's Baseline code.
 //
 // WHY, and why it is NOT the same question as simIcount():
@@ -6320,6 +6345,14 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
 "  instructions EXECUTED, this measures the STATIC footprint that occupies I-cache.\n"
 "  Call fn at least once under --baseline-eager first."),
 
+    JS_FN_HELP("simCensus", SimCensus, 0, 0,
+"simCensus()",
+"  Varan F3 census (DIAGNOSTIC): the simulator's idiom counters as one string\n"
+"  ('VARAN-CENSUS decodes=... nopw=... condfail=...'), cumulative since process\n"
+"  start. Returns the string '-1' with no simulator (the read-not-defaulted\n"
+"  control). T2-only counters must read 0 on the A32 shell and vice versa --\n"
+"  the census comparator asserts both."),
+
     JS_FN_HELP("help", Help, 0, 0,
 "help([name ...])",
 "  Display usage and help messages."),
@@ -8611,5 +8644,17 @@ main(int argc, char** argv, char** envp)
 
     JS_DestroyContext(cx);
     JS_ShutDown();
+
+#if defined(JS_SIMULATOR_ARM)
+    // Varan F3 census (DIAGNOSTIC): env-gated exit dump so a measurement run needs no bench
+    // edit -- VARAN_CENSUS=1 js ... 2>>log captures the counters after the whole workload.
+    // Counters are process-globals, still valid after JS_ShutDown.
+    if (getenv("VARAN_CENSUS")) {
+        char varanBuf[512];
+        ::VaranCensusFormat(varanBuf, sizeof varanBuf);
+        fprintf(stderr, "%s\n", varanBuf);
+    }
+#endif
+
     return result;
 }

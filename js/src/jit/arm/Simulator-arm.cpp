@@ -67,6 +67,51 @@ __aeabi_uidivmod(int x, int y)
 void VaranDumpUdfCensus();   // emit-time UDF census dump; defined in Assembler-arm.cpp (global scope)
 #endif
 
+// Varan F3 CENSUS (POST-FABLE item 3, 2026-08-05) -- DIAGNOSTIC scaffolding; remove with the
+// MANIFEST DIAGNOSTIC series. Converts the F3 width-attribution budget's frequency INFERENCES
+// into measured counts. Counting rule mirrors icount_ (one per decoded slot-instruction,
+// Simulator::execute), so the wide-only padding (NOP.W companion slots, NOP16 packed halves)
+// counts exactly as icount counts it. T2-side counters increment only inside varanThumb2Decode
+// (the A32 control shell never enters it); the condition counters increment only on the A32
+// decode path (the T2 shell returns before it) -- each shell's foreign counters reading ZERO is
+// a cross-control the census comparator asserts. Global scope + extern-decl consumption follows
+// the gVaranUdfEmitCounts precedent above.
+uint64_t gVaranCensusDecodes = 0;        // every instructionDecode entry (== icount_ delta)
+uint64_t gVaranCensusNopW = 0;           // T2: executed NOP.W (2-slot cond-branch companion)
+uint64_t gVaranCensusNop16 = 0;          // T2: executed NOP16 (packed BX/BLX pad half)
+uint64_t gVaranCensusBx16 = 0;           // T2: executed BX16
+uint64_t gVaranCensusBlx16 = 0;          // T2: executed BLX16
+uint64_t gVaranCensusOrr1 = 0;           // T2: executed orr rd,rd,#1 (the B1 Thumb-bit set)
+uint64_t gVaranCensusSeqIcCall = 0;      // T2: movw,movt,orr#1,NOP16 then BLX16 (IC dispatch)
+uint64_t gVaranCensusSeqStubHop = 0;     // T2: ldr,ldr,orr#1,NOP16 then BX16 (monitor/stub hop)
+uint64_t gVaranCensusWide32 = 0;         // T2: executed 32-bit words (narrowable denominator)
+uint64_t gVaranCensusNarrow = 0;         // T2: of those, words with a same-semantics 16-bit form
+uint64_t gVaranCensusCondFail = 0;       // A32: condition-failed decodes (non-AL)
+uint64_t gVaranCensusCondPassNonBr = 0;  // A32: cond-passed non-AL, type != 5 (predicated body)
+uint64_t gVaranCensusCondPassBr = 0;     // A32: cond-passed non-AL, type == 5 (B/BL)
+
+void
+VaranCensusFormat(char* out, size_t outlen)
+{
+    snprintf(out, outlen,
+             "VARAN-CENSUS decodes=%llu nopw=%llu nop16=%llu bx16=%llu blx16=%llu orr1=%llu"
+             " seq_iccall=%llu seq_stubhop=%llu wide32=%llu narrow=%llu"
+             " condfail=%llu condpass_nonbr=%llu condpass_br=%llu",
+             (unsigned long long)gVaranCensusDecodes,
+             (unsigned long long)gVaranCensusNopW,
+             (unsigned long long)gVaranCensusNop16,
+             (unsigned long long)gVaranCensusBx16,
+             (unsigned long long)gVaranCensusBlx16,
+             (unsigned long long)gVaranCensusOrr1,
+             (unsigned long long)gVaranCensusSeqIcCall,
+             (unsigned long long)gVaranCensusSeqStubHop,
+             (unsigned long long)gVaranCensusWide32,
+             (unsigned long long)gVaranCensusNarrow,
+             (unsigned long long)gVaranCensusCondFail,
+             (unsigned long long)gVaranCensusCondPassNonBr,
+             (unsigned long long)gVaranCensusCondPassBr);
+}
+
 namespace js {
 namespace jit {
 
@@ -4741,6 +4786,8 @@ Simulator::instructionDecode(SimInstruction* instr)
 
     pc_modified_ = false;
 
+    gVaranCensusDecodes++;   // Varan F3 census: mirrors icount_ (one per decoded instruction)
+
 #if defined(VARAN_THUMB2)
     // The VARAN encoder emits ONLY Thumb-2 (device is Thumb-only, F1). Decode as Thumb-2.
     varanThumb2Decode(instr);
@@ -4750,7 +4797,21 @@ Simulator::instructionDecode(SimInstruction* instr)
     static const uint32_t kSpecialCondition = 15 << 28;
     if (instr->conditionField() == kSpecialCondition) {
         decodeSpecialCondition(instr);
-    } else if (conditionallyExecute(instr)) {
+    } else if ([&] {
+        // Varan F3 census: A32 predication frequency (budget row 4). Pure observation --
+        // conditionallyExecute is a flag read, called exactly once as before; the lambda
+        // preserves the original control flow (the isStop() arm below is the FAILED path).
+        bool varanCondPass = conditionallyExecute(instr);
+        if (instr->conditionField() != Assembler::AL) {
+            if (!varanCondPass)
+                gVaranCensusCondFail++;
+            else if (instr->typeValue() == 5)
+                gVaranCensusCondPassBr++;
+            else
+                gVaranCensusCondPassNonBr++;
+        }
+        return varanCondPass;
+    }()) {
         switch (instr->typeValue()) {
           case 0:
           case 1:
@@ -4831,6 +4892,117 @@ Simulator::varanCheckInterworkTarget(int32_t target, const char* site)
     MOZ_CRASH("VARAN-SIM: interworking branch to a non-Thumb (even) target");
 }
 
+// --- Varan F3 census helpers (DIAGNOSTIC; globals at the top of this file) -----------------
+// 4-deep event-class ring for the two idiom-sequence buckets. Only the shapes those sequences
+// need are classified; everything else is OTHER.
+enum VaranCensusKlass : uint8_t {
+    VCX_OTHER = 0, VCX_MOVW, VCX_MOVT, VCX_ORR1, VCX_NOP16, VCX_LDR
+};
+static uint8_t gVaranCensusRing[4] = { 0, 0, 0, 0 };
+
+// Narrow-encodability (census measurement ii): TRUE iff this executed 32-bit word has a 16-bit
+// encoding with IDENTICAL semantics (flag behavior included). CONSERVATIVE: unlisted shapes
+// return false, so the measured fraction is a LOWER BOUND on narrow-density recovery. The rule
+// list is enumerated in VARAN-POSTFABLE-FOLLOWUPS.md item 3.
+static bool
+VaranCensusNarrowable(uint16_t hw0, uint16_t hw1)
+{
+    // T3 data-processing (shifted register): 1110101 op4 S rn | (0)imm3 rd imm2 type rm
+    if ((hw0 >> 9) == 0x75u) {
+        uint32_t op = (hw0 >> 5) & 0xf;
+        bool s = (hw0 >> 4) & 1;
+        uint32_t rn = hw0 & 0xf;
+        uint32_t imm3 = (hw1 >> 12) & 0x7, rd = (hw1 >> 8) & 0xf;
+        uint32_t imm2 = (hw1 >> 6) & 0x3, type = (hw1 >> 4) & 0x3, rm = hw1 & 0xf;
+        if (imm3 | imm2 | type)
+            return false;                                   // any shift kills all 16-bit forms
+        bool low = rd <= 7 && rm <= 7;
+        switch (op) {
+          case 0x0:                                         // AND (rd=PC,S => TST)
+            if (rd == 0xf) return s && rn <= 7 && rm <= 7;  // TST low,low
+            return s && rd == rn && low;                    // ANDS 2-op low
+          case 0x1: return s && rd == rn && low;            // BICS
+          case 0x2:                                         // ORR (rn=PC => MOV reg)
+            if (rn == 0xf) {
+                if (!s) return true;                        // T1 MOV reg: any regs, no flags
+                return low;                                 // MOVS reg -> T1 LSLS #0, low regs
+            }
+            return s && rd == rn && low;                    // ORRS
+          case 0x3:                                         // ORN (rn=PC => MVN)
+            if (rn == 0xf) return s && low;                 // MVNS low
+            return false;
+          case 0x4: return s && rd == rn && low;            // EORS
+          case 0x8:                                         // ADD (rd=PC,S => CMN)
+            if (rd == 0xf) return s && rn <= 7 && rm <= 7;  // CMN low,low
+            if (s) return rd <= 7 && rn <= 7 && rm <= 7;    // ADDS 3-op low
+            return rd == rn;                                // T2-16 ADD reg: any regs, no flags
+          case 0xa: return s && rd == rn && low;            // ADCS
+          case 0xb: return s && rd == rn && low;            // SBCS
+          case 0xd:                                         // SUB (rd=PC,S => CMP)
+            if (rd == 0xf) return s;                        // CMP reg: T1 low-low / T2-16 any
+            return s && rd <= 7 && rn <= 7 && rm <= 7;      // SUBS 3-op low
+          default: return false;
+        }
+    }
+    // T3 data-processing (modified immediate): 11110 i 0 op4 S rn | 0 imm3 rd imm8
+    if ((hw0 & 0xfa00) == 0xf000 && (hw1 & 0x8000) == 0) {
+        uint32_t op = (hw0 >> 5) & 0xf;
+        bool s = (hw0 >> 4) & 1;
+        uint32_t rn = hw0 & 0xf;
+        bool i = (hw0 >> 10) & 1;
+        uint32_t imm3 = (hw1 >> 12) & 0x7, rd = (hw1 >> 8) & 0xf, imm8 = hw1 & 0xff;
+        if (i || imm3 != 0)
+            return false;                                   // only plain 0..255 immediates
+        switch (op) {
+          case 0x2:                                         // ORR rn=PC => MOV imm
+            return rn == 0xf && s && rd <= 7;               // T1 MOVS imm8
+          case 0x8:                                         // ADD imm (rd=PC => CMN: no T1)
+            if (rd == 0xf) return false;
+            return s && rd <= 7 && rn <= 7 && (rd == rn || imm8 <= 7);  // ADDS imm8/imm3
+          case 0xd:                                         // SUB imm (rd=PC,S => CMP imm)
+            if (rd == 0xf) return s && rn <= 7;             // T1 CMP imm8
+            return s && rd <= 7 && rn <= 7 && (rd == rn || imm8 <= 7);  // SUBS imm8/imm3
+          default: return false;
+        }
+    }
+    // T3 single load/store, positive imm12: 111110001SL1 rn | rt imm12
+    if ((hw0 & 0xff00) == 0xf800 && (hw0 & 0x00f0) >= 0x0080) {
+        uint32_t form = hw0 & 0xfff0;
+        uint32_t rn = hw0 & 0xf, rt = (hw1 >> 12) & 0xf, imm12 = hw1 & 0xfff;
+        if (rn == 13 && (form == 0xf8c0 || form == 0xf8d0))  // SP-relative STR/LDR
+            return rt <= 7 && (imm12 & 3) == 0 && imm12 <= 1020;
+        if (rn > 7 || rt > 7)
+            return false;
+        switch (form) {
+          case 0xf8c0: case 0xf8d0: return (imm12 & 3) == 0 && imm12 <= 124;  // STR/LDR
+          case 0xf8a0: case 0xf8b0: return (imm12 & 1) == 0 && imm12 <= 62;   // STRH/LDRH
+          case 0xf880: case 0xf890: return imm12 <= 31;                        // STRB/LDRB
+          default: return false;
+        }
+    }
+    // T3 conditional branch: 11110 S cond imm6 | 10 J1 0 J2 imm11 -> T1 Bcc iff off in [-256,254]
+    if ((hw0 & 0xf800) == 0xf000 && (hw1 & 0xd000) == 0x8000) {
+        uint32_t cond = (hw0 >> 6) & 0xf;
+        if (cond >= 0xe)
+            return false;
+        uint32_t sb = (hw0 >> 10) & 1, imm6 = hw0 & 0x3f;
+        uint32_t j1 = (hw1 >> 13) & 1, j2 = (hw1 >> 11) & 1, imm11 = hw1 & 0x7ff;
+        int32_t off = int32_t((sb << 20) | (j2 << 19) | (j1 << 18) | (imm6 << 12) | (imm11 << 1));
+        off = (off << 11) >> 11;                             // sign-extend 21 bits
+        return off >= -256 && off <= 254;
+    }
+    // T4 unconditional branch: 11110 S imm10 | 10 J1 1 J2 imm11 -> T2-16 B iff off in [-2048,2046]
+    if ((hw0 & 0xf800) == 0xf000 && (hw1 & 0xd000) == 0x9000) {
+        uint32_t sb = (hw0 >> 10) & 1, imm10 = hw0 & 0x3ff;
+        uint32_t j1 = (hw1 >> 13) & 1, j2 = (hw1 >> 11) & 1, imm11 = hw1 & 0x7ff;
+        uint32_t i1 = (~(j1 ^ sb)) & 1, i2 = (~(j2 ^ sb)) & 1;
+        int32_t off = int32_t((sb << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1));
+        off = (off << 7) >> 7;                               // sign-extend 25 bits
+        return off >= -2048 && off <= 2046;
+    }
+    return false;
+}
+
 void
 Simulator::varanThumb2Decode(SimInstruction* instr)
 {
@@ -4859,6 +5031,50 @@ Simulator::varanThumb2Decode(SimInstruction* instr)
     uint32_t top5 = (hw0 >> 11) & 0x1f;
     bool is32 = (top5 == 0x1d || top5 == 0x1e || top5 == 0x1f);
     int len = is32 ? 4 : 2;
+
+    // --- Varan F3 census: pure observation of the decoded (hw0,hw1) -- no behavioral effect.
+    // Sequence buckets check the ring BEFORE the current event is pushed (ring = previous 4).
+    {
+        uint8_t varanKlass = VCX_OTHER;
+        if (is32) {
+            uint16_t chw1 = p[1];
+            gVaranCensusWide32++;
+            if (hw0 == 0xf3afu && chw1 == 0x8000u) {
+                gVaranCensusNopW++;
+            } else if ((hw0 & 0xfff0) == 0xf040 && (chw1 & 0xf0ff) == 0x0001 &&
+                       ((chw1 >> 8) & 0xf) == (hw0 & 0xf)) {
+                gVaranCensusOrr1++;                 // orr rd,rd,#1 (B1 Thumb-bit)
+                varanKlass = VCX_ORR1;
+            } else if ((hw0 & 0xfbf0) == 0xf240) {
+                varanKlass = VCX_MOVW;
+            } else if ((hw0 & 0xfbf0) == 0xf2c0) {
+                varanKlass = VCX_MOVT;
+            } else if ((hw0 & 0xfff0) == 0xf8d0 || (hw0 & 0xfff0) == 0xf850) {
+                varanKlass = VCX_LDR;               // LDR imm12 (T3) / imm8-neg (T4)
+            }
+            if (VaranCensusNarrowable(hw0, chw1))
+                gVaranCensusNarrow++;
+        } else {
+            if (hw0 == 0xbf00) {
+                gVaranCensusNop16++;
+                varanKlass = VCX_NOP16;
+            } else if ((hw0 & 0xff87) == 0x4780) {
+                gVaranCensusBlx16++;
+                if (gVaranCensusRing[3] == VCX_NOP16 && gVaranCensusRing[2] == VCX_ORR1 &&
+                    gVaranCensusRing[1] == VCX_MOVT && gVaranCensusRing[0] == VCX_MOVW)
+                    gVaranCensusSeqIcCall++;
+            } else if ((hw0 & 0xff87) == 0x4700) {
+                gVaranCensusBx16++;
+                if (gVaranCensusRing[3] == VCX_NOP16 && gVaranCensusRing[2] == VCX_ORR1 &&
+                    gVaranCensusRing[1] == VCX_LDR && gVaranCensusRing[0] == VCX_LDR)
+                    gVaranCensusSeqStubHop++;
+            }
+        }
+        gVaranCensusRing[0] = gVaranCensusRing[1];
+        gVaranCensusRing[1] = gVaranCensusRing[2];
+        gVaranCensusRing[2] = gVaranCensusRing[3];
+        gVaranCensusRing[3] = varanKlass;
+    }
 
     if (is32) {
         uint16_t hw1 = p[1];

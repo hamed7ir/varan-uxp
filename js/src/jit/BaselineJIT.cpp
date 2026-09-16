@@ -14,9 +14,12 @@
 #include "jit/CompileInfo.h"
 #include "jit/JitCommon.h"
 #include "jit/JitSpewer.h"
+#include "mozilla/Atomics.h"
+
 #include "vm/Debugger.h"
 #include "vm/Interpreter.h"
 #include "vm/TraceLogging.h"
+#include "vm/VaranJitLog.h"
 #include "wasm/WasmInstance.h"
 
 #include "jsobjinlines.h"
@@ -292,7 +295,31 @@ jit::BaselineCompile(JSContext* cx, JSScript* script, bool forceDebugInstrumenta
     if (forceDebugInstrumentation)
         compiler.setCompileDebugInstrumentation();
 
+    // Varan: Q2 attribution -- time every Baseline compile. Per-line threshold
+    // 10 ms; cum_ms/n carry EXACT totals regardless of the threshold, and a
+    // heartbeat line every 256 compiles keeps the totals visible even when no
+    // single compile crosses it. VARAN_JITLOG-gated.
+    int64_t varanT0 = 0;
+    if (VaranJitLogFile())
+        varanT0 = PRMJ_Now();
+
     MethodStatus status = compiler.compile();
+
+    if (FILE* varanLog = VaranJitLogFile()) {
+        static mozilla::Atomic<uint64_t, mozilla::Relaxed> varanCumUs(0);
+        static mozilla::Atomic<uint32_t, mozilla::Relaxed> varanCount(0);
+        uint64_t us = uint64_t(PRMJ_Now() - varanT0);
+        varanCumUs += us;
+        uint32_t n = ++varanCount;
+        if (us >= 10000 || (n & 0xFF) == 0) {
+            fprintf(varanLog, "BLC t=%lld ms=%.1f script=%s:%u len=%u cum_ms=%llu n=%u\n",
+                    (long long)(varanT0 / 1000), double(us) / 1000.0,
+                    script->filename() ? script->filename() : "?",
+                    (unsigned)script->lineno(), (unsigned)script->length(),
+                    (unsigned long long)(varanCumUs / 1000), n);
+            fflush(varanLog);
+        }
+    }
 
     MOZ_ASSERT_IF(status == Method_Compiled, script->hasBaselineScript());
     MOZ_ASSERT_IF(status != Method_Compiled, !script->hasBaselineScript());

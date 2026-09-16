@@ -49,6 +49,7 @@
 #include "vm/Debugger.h"
 #include "vm/HelperThreads.h"
 #include "vm/TraceLogging.h"
+#include "vm/VaranJitLog.h"
 
 #include "jscompartmentinlines.h"
 #include "jsobjinlines.h"
@@ -2305,6 +2306,17 @@ IonCompile(JSContext* cx, JSScript* script,
                 ". (Compiled on background thread.)",
                 builderScript->filename(), builderScript->lineno());
 
+        // Varan: per-compile FACT that the back end was dispatched off-thread
+        // (settles the IonOptimizationLevels.h:136 suspicion). Absence of this
+        // line after an ION line means the back end ran synchronously.
+        if (FILE* varanLog = VaranJitLogFile()) {
+            fprintf(varanLog, "ION-QUEUE t=%lld script=%s:%u\n",
+                    (long long)(PRMJ_Now() / 1000),
+                    builderScript->filename() ? builderScript->filename() : "?",
+                    (unsigned)builderScript->lineno());
+            fflush(varanLog);
+        }
+
         if (!CreateMIRRootList(*builder))
             return AbortReason_Alloc;
 
@@ -2521,7 +2533,25 @@ Compile(JSContext* cx, HandleScript script, BaselineFrame* osrFrame, jsbytecode*
         recompile = true;
     }
 
+    // Varan: time the MAIN-THREAD cost of one Ion compile (front end + queue
+    // when the back end goes off-thread, or the full sync compile otherwise)
+    // for the Q1/Q2 blocked-time attribution run. VARAN_JITLOG-gated.
+    int64_t varanT0 = 0;
+    if (VaranJitLogFile())
+        varanT0 = PRMJ_Now();
+
     AbortReason reason = IonCompile(cx, script, osrFrame, osrPc, recompile, optimizationLevel);
+
+    if (FILE* varanLog = VaranJitLogFile()) {
+        fprintf(varanLog, "ION t=%lld ms=%.1f script=%s:%u len=%u osr=%d reason=%d\n",
+                (long long)(varanT0 / 1000),
+                double(PRMJ_Now() - varanT0) / 1000.0,
+                script->filename() ? script->filename() : "?",
+                (unsigned)script->lineno(), (unsigned)script->length(),
+                osrPc ? 1 : 0, (int)reason);
+        fflush(varanLog);
+    }
+
     if (reason == AbortReason_Error)
         return Method_Error;
 
@@ -3232,6 +3262,15 @@ jit::Invalidate(TypeZone& types, FreeOp* fop,
 
         JitSpew(JitSpew_IonInvalidate, " Invalidate %s:%" PRIuSIZE ", IonScript %p",
                 co->script()->filename(), co->script()->lineno(), co->ion());
+
+        // Varan: count Ion invalidations (Q1 compile-discard churn candidate).
+        if (FILE* varanLog = VaranJitLogFile()) {
+            fprintf(varanLog, "INVAL t=%lld script=%s:%u\n",
+                    (long long)(PRMJ_Now() / 1000),
+                    co->script()->filename() ? co->script()->filename() : "?",
+                    (unsigned)co->script()->lineno());
+            fflush(varanLog);
+        }
 
         // Keep the ion script alive during the invalidation and flag this
         // ionScript as being invalidated.  This increment is removed by the

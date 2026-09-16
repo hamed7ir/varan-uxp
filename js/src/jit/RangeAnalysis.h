@@ -158,11 +158,11 @@ class Range : public TempObject {
     static const int64_t NoInt32UpperBound = int64_t(JSVAL_INT_MAX) + 1;
     static const int64_t NoInt32LowerBound = int64_t(JSVAL_INT_MIN) - 1;
 
-    enum FractionalPartFlag {
+    enum FractionalPartFlag : uint32_t {
         ExcludesFractionalParts = false,
         IncludesFractionalParts = true
     };
-    enum NegativeZeroFlag {
+    enum NegativeZeroFlag : uint32_t {
         ExcludesNegativeZero = false,
         IncludesNegativeZero = true
     };

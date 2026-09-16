@@ -10,6 +10,7 @@
 #include "jsfuninlines.h"
 
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/Atomics.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/PodOperations.h"
@@ -50,6 +51,7 @@
 #include "vm/Shape.h"
 #include "vm/SharedImmutableStringsCache.h"
 #include "vm/StringBuffer.h"
+#include "vm/VaranJitLog.h"
 #include "vm/WrapperObject.h"
 #include "vm/Xdr.h"
 #include "wasm/AsmJS.h"
@@ -1498,6 +1500,14 @@ JSFunction::createScriptForLazilyInterpretedFunction(JSContext* cx, HandleFuncti
         if (!chars)
             return false;
 
+        // Varan: Q2 attribution -- time first-call delazification (the full
+        // parse+emit of a lazy function body during EXECUTION, a bucket the
+        // parse-phase percentages never measured). Per-line threshold 1 ms;
+        // cum_ms/n carry exact totals; heartbeat every 256. VARAN_JITLOG-gated.
+        int64_t varanT0 = 0;
+        if (VaranJitLogFile())
+            varanT0 = PRMJ_Now();
+
         if (!frontend::CompileLazyFunction(cx, lazy, chars, lazyLength)) {
             // The frontend may have linked the function and the non-lazy
             // script together during bytecode compilation. Reset it now on
@@ -1506,6 +1516,22 @@ JSFunction::createScriptForLazilyInterpretedFunction(JSContext* cx, HandleFuncti
             if (lazy->hasScript())
                 lazy->resetScript();
             return false;
+        }
+
+        if (FILE* varanLog = VaranJitLogFile()) {
+            static mozilla::Atomic<uint64_t, mozilla::Relaxed> varanCumUs(0);
+            static mozilla::Atomic<uint32_t, mozilla::Relaxed> varanCount(0);
+            uint64_t us = uint64_t(PRMJ_Now() - varanT0);
+            varanCumUs += us;
+            uint32_t n = ++varanCount;
+            if (us >= 1000 || (n & 0xFF) == 0) {
+                fprintf(varanLog, "DELAZ t=%lld ms=%.2f file=%s:%u src_units=%llu cum_ms=%llu n=%u\n",
+                        (long long)(varanT0 / 1000), double(us) / 1000.0,
+                        lazy->filename() ? lazy->filename() : "?",
+                        (unsigned)lazy->lineno(),
+                        (unsigned long long)lazyLength,
+                        (unsigned long long)(varanCumUs / 1000), n);
+            }
         }
 
         script = fun->nonLazyScript();

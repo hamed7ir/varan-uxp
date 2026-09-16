@@ -307,7 +307,7 @@ enum IsImmEDTR_ {
     IsNotImmEDTR = 0 << 22
 };
 
-enum ShiftType {
+enum ShiftType : uint32_t {
     LSL = 0, // << 5
     LSR = 1, // << 5
     ASR = 2, // << 5
@@ -1262,7 +1262,7 @@ class Assembler : public AssemblerShared
 {
   public:
     // ARM conditional constants:
-    enum ARMCondition {
+    enum ARMCondition : uint32_t {
         EQ = 0x00000000, // Zero
         NE = 0x10000000, // Non-zero
         CS = 0x20000000,
@@ -1280,7 +1280,7 @@ class Assembler : public AssemblerShared
         AL = 0xe0000000
     };
 
-    enum Condition {
+    enum Condition : uint32_t {
         Equal = EQ,
         NotEqual = NE,
         Above = HI,
@@ -1347,7 +1347,7 @@ class Assembler : public AssemblerShared
     // ConditionFromDoubleCondition will complain.
     static const int DoubleConditionBitSpecial = 0x1;
 
-    enum DoubleCondition {
+    enum DoubleCondition : uint32_t {
         // These conditions will only evaluate to true if the comparison is
         // ordered - i.e. neither operand is NaN.
         DoubleOrdered = VFP_NotUnordered,

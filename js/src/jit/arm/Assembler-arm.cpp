@@ -26,6 +26,36 @@ using namespace js::jit;
 
 using mozilla::CountLeadingZeroes32;
 
+// Varan (H3, 2026-08-09): BUG-3 FAMILY SIZE LOCKS.
+//
+// Bug 3 in CLANG-CL-THUMBV7-BUGS.md is adjudicated NOT a clang bug -- clang-cl's
+// MS-ABI bitfield layout is byte-identical to genuine MSVC 14.16 ARM. The defect
+// was ours: these encoding structs mixed bitfield underlying types (bool +
+// uint32_t + enum), and under the MS rule a type change STARTS A NEW STORAGE UNIT,
+// so each struct silently ballooned past 32 bits. They were fixed at source by
+// declaring every bitfield as a uniform uint32_t.
+//
+// Nothing enforced that fix. `PoolHeader` was asserted (see WritePoolHeader
+// below) and so its regression would have been caught; the rest were not, which
+// is exactly why their mismatch was silent. These locks close that asymmetry.
+// All values MEASURED 2026-08-09 via `-Xclang -fdump-record-layouts` on this TU
+// with the real build flags, not inferred from the layout rule.
+//
+// NOT LOCKED, deliberately: `js::jit::Operand` is 12 bytes under the MS ABI vs 8
+// under Itanium (MEASURED: sizeof=12, align=4). It is upstream-unmodified, nothing
+// depends on its size, and pinning it would be a gratuitous upstream divergence
+// for 4 bytes. Do not "fix" it.
+static_assert(sizeof(js::jit::Operand2) == 4,
+              "Varan/Bug-3: Operand2 must stay a single 32-bit encoding word.");
+static_assert(sizeof(js::jit::Op2Reg) == 4,
+              "Varan/Bug-3: Op2Reg must stay a single 32-bit encoding word.");
+static_assert(sizeof(js::jit::datastore::Reg) == 4,
+              "Varan/Bug-3: datastore::Reg must stay a single 32-bit encoding word.");
+static_assert(sizeof(js::jit::datastore::RRS) == 4,
+              "Varan/Bug-3: datastore::RRS must stay a single 32-bit encoding word.");
+static_assert(sizeof(js::jit::datastore::Imm8mData) == 4,
+              "Varan/Bug-3: Imm8mData must stay a single 32-bit encoding word.");
+
 void dbg_break() {}
 
 // The ABIArgGenerator is used for making system ABI calls and for inter-wasm

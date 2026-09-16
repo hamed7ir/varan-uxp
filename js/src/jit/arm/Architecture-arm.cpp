@@ -21,6 +21,23 @@
 #include "jit/arm/Assembler-arm.h"
 #include "jit/RegisterSets.h"
 
+// Varan (H3, 2026-08-09): BUG-3 FAMILY SIZE LOCK for VFPRegister.
+//
+// VFPRegister packs {RegType kind:2, uint32_t code_:5, uint32_t _isInvalid:1,
+// uint32_t _isMissing:1} and MUST stay one 32-bit word. Before the Varan fix the
+// two flags were `bool`, which under the MS-ABI rule (a change of bitfield
+// underlying type starts a NEW storage unit) made it 8 bytes -- the same shape
+// that broke PoolHeader. PoolHeader's fix has been guarded by a sizeof assert
+// since M1; VFPRegister's was not, and `sizeof(VFPRegister)` appeared in ZERO
+// assertions tree-wide. That asymmetry is why PoolHeader's regression would have
+// been loud and this one silent.
+//
+// MEASURED 2026-08-09 (not inferred): `-Xclang -fdump-record-layouts` on this TU
+// with the real build flags reports `js::jit::VFPRegister sizeof=4 align=4`.
+static_assert(sizeof(js::jit::VFPRegister) == 4,
+              "Varan/Bug-3: VFPRegister must stay a single 32-bit word; a bool "
+              "bitfield here starts a new MS-ABI storage unit and doubles it.");
+
 #if !defined(__linux__) || defined(JS_SIMULATOR_ARM)
 // The hwcap.h kernel header is not defined when building the simulator,
 // so inline the header defines we need.
