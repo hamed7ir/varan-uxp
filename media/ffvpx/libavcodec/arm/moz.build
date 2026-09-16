@@ -10,6 +10,36 @@ SOURCES += [
     'mpegaudiodsp_init_arm.c',
 ]
 
+# Varan v1.1: VP8/VP9 ARM NEON, vendored from FFmpeg n6.1 (matches this tree's
+# libavcodec 60.31.102). Without these, ffvpx decoded VP9 with architecture-blind
+# scalar C on ARM -- device-measured 2625 dropped of 4612 frames (57%) at 854x480 --
+# while the SAME component on x86 builds 23 SIMD files with SSE2/AVX2.
+#
+# MEASURED before landing: all 15 ffvpx ARM .S assemble to ARMNT 0x1C4 with ZERO
+# A32 relocations (R4 holds; Thumb-2 comes from CONFIG_THUMB=1 in
+# config_win32_arm.h via ffmpeg's asm.S macro layer), and all 13 ARM .c compile.
+#
+# Scoped to WINNT: other ARM targets keep upstream's source set untouched.
+if CONFIG['OS_TARGET'] == 'WINNT':
+    SOURCES += [
+        'neon.S',
+        'vp8_armv6.S',
+        'vp8dsp_armv6.S',
+        'vp8dsp_init_arm.c',
+        'vp8dsp_init_armv6.c',
+        'vp8dsp_init_neon.c',
+        'vp8dsp_neon.S',
+        'vp9dsp_init_10bpp_arm.c',
+        'vp9dsp_init_12bpp_arm.c',
+        'vp9dsp_init_arm.c',
+        'vp9itxfm_16bpp_neon.S',
+        'vp9itxfm_neon.S',
+        'vp9lpf_16bpp_neon.S',
+        'vp9lpf_neon.S',
+        'vp9mc_16bpp_neon.S',
+        'vp9mc_neon.S',
+    ]
+
 FINAL_LIBRARY = 'mozavcodec'
 
 include('/media/ffvpx/ffvpxcommon.mozbuild')

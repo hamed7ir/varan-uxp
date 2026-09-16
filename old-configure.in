@@ -3309,6 +3309,22 @@ if test -n "$MOZ_FFVPX" -a -n "$COMPILE_ENVIRONMENT"; then
   WINNT:x86_64)
     FFVPX_ASFLAGS="-D__x86_64__ -DPIC -DWIN64 -DMSVC"
   ;;
+  dnl Varan v1.1: Windows-ARM32. This case exists for TWO reasons.
+  dnl   1. media/ffvpx/libavcodec/moz.build and libavutil/moz.build gate their
+  dnl      arm/ subdirectory on `if CONFIG['FFVPX_ASFLAGS']:`. With no WINNT:arm
+  dnl      case the variable was empty, the directory was never traversed, and
+  dnl      every ffvpx ARM .S/.c was silently dropped from the build. That is why
+  dnl      ffvpx decoded VP9 with architecture-blind scalar C on this target.
+  dnl   2. The value itself is minimal on purpose. The ARM .S take their
+  dnl      configuration from media/ffvpx/config_win32_arm.h (ARCH_ARM, HAVE_NEON,
+  dnl      CONFIG_THUMB, HAVE_AS_*), NOT from the command line -- the header wins,
+  dnl      as a -D experiment confirmed. -DPIC is deliberately NOT set: CONFIG_PIC
+  dnl      is 0 for COFF, which has no ELF GOT-relative addressing.
+  dnl The .S are assembled by media/ffvpx/ffvpx-asm-wrap.sh, a scoped AS override
+  dnl in each arm dir's Makefile.in, because autoconf.mk sets AS to a no-op here.
+  WINNT:arm)
+    FFVPX_ASFLAGS="-DWIN32"
+  ;;
   *:x86_64)
     if $CC -E -dM -</dev/null | grep -q __ELF__; then
       FFVPX_ASFLAGS="-D__x86_64__ -DPIC -DELF"

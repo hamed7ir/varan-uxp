@@ -104,6 +104,13 @@ private:
 #endif
   DECL_MEDIA_PREF("media.use-blank-decoder",                  PDMUseBlankDecoder, bool, false);
   DECL_MEDIA_PREF("media.gpu-process-decoder",                PDMUseGPUDecoder, bool, false);
+  // Varan v1.1: on ARM32, choose which decoder handles VP8/VP9.
+  //   true  (default) -> libvpx, via AgnosticDecoderModule registered before ffvpx
+  //   false           -> ffvpx, which now has vendored ARM NEON
+  // Both have NEON as of v1.1, so this exists to A/B them on ONE build and ONE
+  // device trip instead of two. It does NOT gate FLAC/MP3: those stay on ffvpx
+  // either way, because AgnosticDecoderModule does not claim them.
+  DECL_MEDIA_PREF("media.arm.prefer-libvpx",                  ARMPreferLibvpx, bool, true);
 #ifdef MOZ_FFMPEG
   DECL_MEDIA_PREF("media.ffmpeg.enabled",                     PDMFFmpegEnabled, bool, true);
 #endif

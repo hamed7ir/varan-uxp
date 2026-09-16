@@ -1,0 +1,21 @@
+# -*- Makefile -*-
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+include $(topsrcdir)/config/rules.mk
+
+# Varan v1.1: SCOPED AS override for this directory only.
+#
+# autoconf.mk sets `AS = :` (a shell no-op) on Windows-ARM32, so every .S here
+# was silently skipped and produced no object -- which is why ffvpx shipped with
+# zero ARM assembly despite the sources being listed in SOURCES.
+#
+# Same seam libffi already uses (config/external/ffi/Makefile.in:22). The wrapper
+# translates the GNU-style recipe into clang-cl's spelling; clang-cl assembles
+# ffmpeg's GNU-syntax .S for thumbv7-windows-msvc directly.
+ifeq ($(OS_TARGET),WINNT)
+ifneq (,$(filter arm%,$(CPU_ARCH)))
+AS = $(topsrcdir)/media/ffvpx/ffvpx-asm-wrap.sh
+endif
+endif

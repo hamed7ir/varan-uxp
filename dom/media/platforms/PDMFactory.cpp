@@ -377,8 +377,12 @@ PDMFactory::CreatePDMs()
   // them, so their routing is unchanged. FLAC and MP3 still fall through to ffvpx below
   // because Agnostic does not claim them. H.264 and AAC are unaffected: WMFDecoderModule
   // is registered above this and already claims them.
-  m = new AgnosticDecoderModule();
-  StartupPDM(m);
+  // v1.1: gated so one build can A/B both decoders. Default true = libvpx.
+  if (MediaPrefs::ARMPreferLibvpx()) {
+    m = new AgnosticDecoderModule();
+    StartupPDM(m);
+    mVaranAgnosticRegisteredEarly = true;
+  }
 #endif
 #ifdef MOZ_FFVPX
   if (MediaPrefs::PDMFFVPXEnabled()) {
@@ -399,14 +403,14 @@ PDMFactory::CreatePDMs()
   StartupPDM(m);
 #endif
 
-#if !defined(_M_ARM)
-  // Varan v1.1: on ARM32 this module is registered EARLIER, above ffvpx, so that
-  // VP8/VP9 reach libvpx rather than ffvpx's scalar C. Registering it here as well
-  // would be harmless (GetDecoder takes the first match) but would allocate a second
-  // module that can never be reached, so the ARM path skips it here.
-  m = new AgnosticDecoderModule();
-  StartupPDM(m);
-#endif
+  // Varan v1.1: on ARM32 this may already have been registered above, ahead of
+  // ffvpx, when media.arm.prefer-libvpx is true. Registering twice would be
+  // harmless (GetDecoder takes the first match) but would allocate a module that
+  // can never be reached, so skip it in that case only.
+  if (!mVaranAgnosticRegisteredEarly) {
+    m = new AgnosticDecoderModule();
+    StartupPDM(m);
+  }
 
 #ifdef MOZ_GMP
   if (MediaPrefs::PDMGMPEnabled()) {

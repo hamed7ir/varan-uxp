@@ -59,6 +59,11 @@ private:
   RefPtr<PlatformDecoderModule> mBlankPDM;
 
   bool mWMFFailedToLoad = false;
+  // Varan v1.1: true when AgnosticDecoderModule was registered EARLY (above ffvpx)
+  // on ARM32 because media.arm.prefer-libvpx is set. The later registration then
+  // skips, so exactly one instance exists. Always false on non-ARM, where the
+  // later registration is the only one.
+  bool mVaranAgnosticRegisteredEarly = false;
   bool mFFmpegFailedToLoad = false;
 #ifdef MOZ_GMP
   bool mGMPPDMFailedToStartup = false;
